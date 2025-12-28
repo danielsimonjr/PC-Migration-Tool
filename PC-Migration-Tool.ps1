@@ -73,6 +73,10 @@ $Global:Config = @{
     )
 }
 
+# Get the folder where this exe/script is located (set at startup)
+$Global:ExeFolder = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent ([Environment]::GetCommandLineArgs()[0]) }
+if (-not $Global:ExeFolder -or $Global:ExeFolder -eq "") { $Global:ExeFolder = (Get-Location).Path }
+
 # ============================================================================
 # LOGGING
 # ============================================================================
@@ -926,6 +930,18 @@ function Start-Backup {
     Write-Host "--- Inventory ---" -ForegroundColor Cyan
     Export-Inventory
 
+    # Create backup manifest (so restore can identify this as a valid backup)
+    $manifest = @{
+        Version = "3.0"
+        BackupDate = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        ComputerName = $env:COMPUTERNAME
+        UserName = $env:USERNAME
+        WindowsVersion = (Get-CimInstance Win32_OperatingSystem).Caption
+    }
+    $manifestPath = Join-Path $Global:Config.BackupDrive "backup-manifest.json"
+    $manifest | ConvertTo-Json | Out-File -FilePath $manifestPath -Encoding UTF8
+    Write-Log "Created backup manifest" -Level INFO
+
     $duration = (Get-Date) - $startTime
 
     Write-Host ""
@@ -950,30 +966,44 @@ function Start-Restore {
     Write-Host "  PC MIGRATION RESTORE" -ForegroundColor Yellow
     Write-Host "============================================" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "This will:" -ForegroundColor White
-    Write-Host "  1. Install packages via Winget/Chocolatey/Scoop" -ForegroundColor Gray
-    Write-Host "  2. Restore user data (Documents, Desktop, etc.)" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "NOTE: Apps will be REINSTALLED properly, not copied." -ForegroundColor Cyan
-    Write-Host "This is the correct way to migrate applications." -ForegroundColor Cyan
-    Write-Host ""
 
     # Verify backup exists
     if (-not (Test-Path $BackupPath)) {
-        Write-Log "Backup path not found: $BackupPath" -Level ERROR
+        Write-Host "ERROR: Folder not found: $BackupPath" -ForegroundColor Red
         return
     }
 
-    $pmPath = Join-Path $BackupPath "PackageManagers"
-    if (-not (Test-Path $pmPath)) {
-        Write-Log "Package manager exports not found in backup" -Level ERROR
+    # Check for backup manifest
+    $manifestPath = Join-Path $BackupPath "backup-manifest.json"
+    if (-not (Test-Path $manifestPath)) {
+        Write-Host "ERROR: This doesn't look like a backup folder." -ForegroundColor Red
+        Write-Host ""
+        Write-Host "No backup-manifest.json found." -ForegroundColor Gray
+        Write-Host "Make sure you selected the folder containing your backup." -ForegroundColor Gray
         return
     }
 
-    Write-Host "Backup location: $BackupPath" -ForegroundColor Yellow
+    # Load and display backup info
+    try {
+        $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+        Write-Host "Found backup from:" -ForegroundColor Green
+        Write-Host "  Computer:  $($manifest.ComputerName)" -ForegroundColor White
+        Write-Host "  User:      $($manifest.UserName)" -ForegroundColor White
+        Write-Host "  Date:      $($manifest.BackupDate)" -ForegroundColor White
+        Write-Host "  Windows:   $($manifest.WindowsVersion)" -ForegroundColor White
+        Write-Host ""
+    }
+    catch {
+        Write-Host "WARNING: Could not read backup info" -ForegroundColor Yellow
+    }
+
+    Write-Host "This will:" -ForegroundColor White
+    Write-Host "  - Reinstall your apps (fresh installs)" -ForegroundColor Gray
+    Write-Host "  - Copy your files back (Documents, Desktop, etc.)" -ForegroundColor Gray
     Write-Host ""
 
     # Show what will be restored
+    $pmPath = Join-Path $BackupPath "PackageManagers"
     $wingetFile = Join-Path $pmPath "winget-packages.json"
     $chocoFile = Join-Path $pmPath "chocolatey-packages.config"
     $scoopFile = Join-Path $pmPath "scoop-packages.json"
@@ -1157,35 +1187,49 @@ function Select-FolderDialog {
     return $null
 }
 
-function Initialize-BackupDrivePrompt {
+function Select-FolderLocation {
+    param(
+        [string]$Title = "Select Folder",
+        [string]$Prompt = "Where would you like to store backups?"
+    )
+
     do {
         Clear-Host
         Write-Host ""
         Write-Host "============================================" -ForegroundColor Cyan
-        Write-Host "  PC MIGRATION TOOLKIT" -ForegroundColor Cyan
+        Write-Host "  $Title" -ForegroundColor Cyan
         Write-Host "============================================" -ForegroundColor Cyan
         Write-Host ""
-        Write-Host "Where would you like to store backups?" -ForegroundColor White
+        Write-Host $Prompt -ForegroundColor White
         Write-Host ""
-        Write-Host "  1. Browse for folder" -ForegroundColor Yellow
-        Write-Host "  2. Enter path manually" -ForegroundColor White
-        Write-Host "  3. Exit" -ForegroundColor Red
+        Write-Host "  1. Use this folder: " -ForegroundColor Green -NoNewline
+        Write-Host $Global:ExeFolder -ForegroundColor Green
+        Write-Host "  2. Browse for folder" -ForegroundColor Yellow
+        Write-Host "  3. Enter path manually" -ForegroundColor White
+        Write-Host "  4. Go back" -ForegroundColor Red
         Write-Host ""
 
-        $choice = Read-Host "Select option (1-3)"
+        $choice = Read-Host "Select option (1-4)"
 
         switch ($choice) {
             "1" {
+                $validation = Test-ValidBackupPath -Path $Global:ExeFolder
+                if ($validation.Valid) {
+                    return $Global:ExeFolder
+                }
+                else {
+                    Write-Host "Can't use this folder: $($validation.Reason)" -ForegroundColor Red
+                    Read-Host "`nPress Enter to try again"
+                }
+            }
+            "2" {
                 Write-Host "Opening folder browser..." -ForegroundColor Cyan
-                $selectedPath = Select-FolderDialog -Description "Select backup destination folder"
+                $selectedPath = Select-FolderDialog -Description $Prompt
 
                 if ($selectedPath) {
                     $validation = Test-ValidBackupPath -Path $selectedPath
                     if ($validation.Valid) {
-                        $Global:Config.BackupDrive = $selectedPath
-                        Write-Host "Backup path set to: $selectedPath" -ForegroundColor Green
-                        Start-Sleep -Seconds 1
-                        return $true
+                        return $selectedPath
                     }
                     else {
                         Write-Host "Invalid path: $($validation.Reason)" -ForegroundColor Red
@@ -1197,7 +1241,7 @@ function Initialize-BackupDrivePrompt {
                     Start-Sleep -Seconds 1
                 }
             }
-            "2" {
+            "3" {
                 Write-Host ""
                 Write-Host "Examples:" -ForegroundColor Gray
                 Write-Host "  D:\PCMigration" -ForegroundColor Gray
@@ -1206,28 +1250,117 @@ function Initialize-BackupDrivePrompt {
                 Write-Host ""
                 Write-Host "Leave blank to go back" -ForegroundColor DarkGray
                 Write-Host ""
-                $newPath = Read-Host "Enter backup path"
+                $newPath = Read-Host "Enter path"
 
                 if ([string]::IsNullOrWhiteSpace($newPath)) {
-                    # Return to menu
                     continue
                 }
 
                 $validation = Test-ValidBackupPath -Path $newPath
                 if ($validation.Valid) {
-                    $Global:Config.BackupDrive = $newPath
-                    Write-Host "Backup path set to: $newPath" -ForegroundColor Green
-                    Start-Sleep -Seconds 1
-                    return $true
+                    return $newPath
                 }
                 else {
                     Write-Host "Invalid path: $($validation.Reason)" -ForegroundColor Red
                     Read-Host "`nPress Enter to try again"
                 }
             }
+            "4" {
+                return $null
+            }
+            default {
+                Write-Host "Invalid option" -ForegroundColor Red
+                Start-Sleep -Seconds 1
+            }
+        }
+    } while ($true)
+}
+
+function Show-MainMenu {
+    do {
+        Clear-Host
+        Write-Host ""
+        Write-Host "============================================" -ForegroundColor Cyan
+        Write-Host "  PC MIGRATION TOOLKIT" -ForegroundColor Cyan
+        Write-Host "============================================" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "  1. BACKUP - Save everything from this PC" -ForegroundColor Green
+        Write-Host "  2. RESTORE - Put everything on this PC" -ForegroundColor Yellow
+        Write-Host "  3. Exit" -ForegroundColor Red
+        Write-Host ""
+
+        $choice = Read-Host "Select option (1-3)"
+
+        switch ($choice) {
+            "1" {
+                $backupPath = Select-FolderLocation -Title "BACKUP" -Prompt "Where would you like to save the backup?"
+                if ($backupPath) {
+                    $Global:Config.BackupDrive = $backupPath
+                    Start-Backup
+                    Read-Host "`nPress Enter to continue"
+                }
+            }
+            "2" {
+                # Check if backup exists in exe folder
+                $manifestPath = Join-Path $Global:ExeFolder "backup-manifest.json"
+
+                if (Test-Path $manifestPath) {
+                    # Found backup - show info and confirm
+                    Clear-Host
+                    Write-Host ""
+                    Write-Host "============================================" -ForegroundColor Yellow
+                    Write-Host "  RESTORE" -ForegroundColor Yellow
+                    Write-Host "============================================" -ForegroundColor Yellow
+                    Write-Host ""
+
+                    try {
+                        $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+                        Write-Host "Found backup in this folder:" -ForegroundColor Green
+                        Write-Host ""
+                        Write-Host "  Computer:  $($manifest.ComputerName)" -ForegroundColor White
+                        Write-Host "  User:      $($manifest.UserName)" -ForegroundColor White
+                        Write-Host "  Date:      $($manifest.BackupDate)" -ForegroundColor White
+                        Write-Host "  Windows:   $($manifest.WindowsVersion)" -ForegroundColor White
+                        Write-Host ""
+                    }
+                    catch {
+                        Write-Host "Found backup in this folder" -ForegroundColor Green
+                        Write-Host ""
+                    }
+
+                    Write-Host "  1. Run Restore" -ForegroundColor Green
+                    Write-Host "  2. Go back" -ForegroundColor Red
+                    Write-Host ""
+
+                    $confirmChoice = Read-Host "Select option (1-2)"
+
+                    if ($confirmChoice -eq "1") {
+                        $Global:Config.BackupDrive = $Global:ExeFolder
+                        Start-Restore -BackupPath $Global:ExeFolder
+                        Read-Host "`nPress Enter to continue"
+                    }
+                }
+                else {
+                    # No backup found - show error
+                    Clear-Host
+                    Write-Host ""
+                    Write-Host "============================================" -ForegroundColor Red
+                    Write-Host "  NO BACKUP FOUND" -ForegroundColor Red
+                    Write-Host "============================================" -ForegroundColor Red
+                    Write-Host ""
+                    Write-Host "No backup was found in this folder:" -ForegroundColor White
+                    Write-Host "  $Global:ExeFolder" -ForegroundColor Gray
+                    Write-Host ""
+                    Write-Host "Make sure the backup files are in the same" -ForegroundColor White
+                    Write-Host "folder as this program." -ForegroundColor White
+                    Write-Host ""
+                    Read-Host "Press Enter to go back"
+                }
+            }
             "3" {
+                Clear-TempFiles
                 Write-Host "`nGoodbye!" -ForegroundColor Cyan
-                return $false
+                return
             }
             default {
                 Write-Host "Invalid option" -ForegroundColor Red
@@ -1244,9 +1377,5 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     exit 1
 }
 
-# Prompt for backup drive on startup
-$continue = Initialize-BackupDrivePrompt
-
-if ($continue) {
-    Start-InteractiveMode
-}
+# Start the main menu
+Show-MainMenu

@@ -1,65 +1,85 @@
 # PC Migration Toolkit
 
-## What This Tool Actually Does
+A simple tool for migrating to a new PC. Designed for non-technical users.
+
+## What This Tool Does
 
 1. **Exports package manager lists** (Winget, Chocolatey, Scoop) so apps can be properly reinstalled
-2. **Backs up user data** (Documents, Desktop, Downloads, Pictures, Videos, Music, SSH keys, select AppData)
-3. **Creates an inventory** of installed apps (for reference - not for restore)
+2. **Backs up user data** (Documents, Desktop, Downloads, Pictures, Videos, Music, AppData settings)
+3. **Creates an inventory** of installed apps (for reference)
 
 ## What This Tool Does NOT Do
 
 - Copy application files (this doesn't work for real app migration)
-- Backup/restore registry keys (this is dangerous and breaks things)
+- Backup/restore registry keys (this breaks things)
 - Magically make apps work without reinstalling them
 
-## How PC Migration Actually Works
-
-1. Run backup on old PC → exports package lists + copies user files
-2. Fresh Windows install on new PC
-3. Run restore on new PC → `winget import` reinstalls apps properly + copies user files back
-4. Apps install correctly through their real installers
-
-## Quick Start
-
-```powershell
-# Run as Administrator (script or exe)
-.\PC-Migration-Tool.ps1
-.\PC-Migration-Tool.exe
-```
-
-On launch, you'll be prompted to select a backup location:
-- **Browse for folder** - Opens Windows folder picker
-- **Enter path manually** - Type a path (e.g., `D:\Backup`, `\\server\share`)
-- **Exit** - Close the application
+## Quick Start (USB Drive Workflow)
 
 ### On Old PC
-1. Select backup destination
-2. Choose **Option 1: Backup**
-3. Wait for completion
-4. Copy backup folder to external drive
+1. Copy `PC-Migration-Tool.exe` to USB drive
+2. Run the exe (right-click → Run as Administrator)
+3. Select **1. BACKUP**
+4. Select **1. Use this folder** (saves backup to USB)
+5. Wait for completion
 
 ### On New PC
-1. Copy backup folder from external drive
-2. Run the tool and select the backup location
-3. Choose **Option 2: Restore**
-4. Wait for packages to install
-5. Restart
+1. Plug in USB drive with backup
+2. Run `PC-Migration-Tool.exe` from the USB
+3. Select **2. RESTORE**
+4. Confirm the backup info looks correct
+5. Select **1. Run Restore**
+6. Wait for apps to install and files to copy
+7. Restart computer
+
+## Menu Structure
+
+### Main Menu
+```
+1. BACKUP - Save everything from this PC
+2. RESTORE - Put everything on this PC
+3. Exit
+```
+
+### Backup Flow
+After selecting Backup, choose where to save:
+```
+1. Use this folder: [exe location]  ← Recommended for USB
+2. Browse for folder
+3. Enter path manually
+4. Go back
+```
+
+### Restore Flow
+Restore auto-detects backups in the exe folder:
+```
+Found backup in this folder:
+  Computer:  OLD-PC-NAME
+  User:      Username
+  Date:      2025-12-28 10:30:00
+  Windows:   Windows 11 Home
+
+1. Run Restore
+2. Go back
+```
+
+If no backup found, shows error with instructions.
 
 ## Output Structure
 
 ```
 BackupLocation\
 ├── PackageManagers\
-│   ├── winget-packages.json       # Winget export (reinstallable)
-│   ├── chocolatey-packages.config # Choco export (reinstallable)
-│   └── scoop-packages.json        # Scoop export (reinstallable)
+│   ├── winget-packages.json
+│   ├── chocolatey-packages.config
+│   └── scoop-packages.json
 ├── UserData\
 │   ├── Documents\
 │   ├── Desktop\
 │   ├── Downloads\
 │   └── AppData\
-│       └── Code\User\             # VS Code settings
-├── inventory.json                 # App list (reference only)
+├── backup-manifest.json          # Identifies valid backup
+├── inventory.json                # App list (reference only)
 └── migration.log
 ```
 
@@ -76,22 +96,19 @@ Check `inventory.json` after restore. It lists all apps that were installed. For
 - Download installer from vendor website
 - Some apps may need license reactivation
 
-## Features
+## Security Features
 
-### Security
 - **Sensitive folders** (`.ssh`) require explicit confirmation before backup
-- **Path validation** blocks system directories and relative paths
-- **Inventory warnings** remind you the file contains system info
-
-### User Experience
-- **Folder browser** - Visual folder picker to select backup location
-- **Progress bar** - Shows percentage complete during user data backup
-- **Size estimation** - Calculates total backup size before starting
+- **Path validation** blocks system directories
+- **Backup manifest** identifies valid backups and shows source PC info
 
 ## Building the EXE
 
-The tool can be compiled to a standalone exe using ps2exe:
+```powershell
+.\build.ps1
+```
 
+Or manually:
 ```powershell
 Import-Module ps2exe
 Invoke-PS2EXE -inputFile '.\PC-Migration-Tool.ps1' -outputFile '.\PC-Migration-Tool.exe' -iconFile '.\pc-migration.ico' -requireAdmin
