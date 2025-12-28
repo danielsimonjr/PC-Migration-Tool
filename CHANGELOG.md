@@ -2,6 +2,11 @@
 
 All notable changes to PC Migration Toolkit.
 
+## [3.6.1] - 2025-12-28
+
+### Fixed
+- Remove undefined `Clear-TempFiles` function call on Exit option
+
 ## [3.6] - 2025-12-28
 
 ### Added

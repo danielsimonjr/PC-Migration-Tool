@@ -2052,7 +2052,6 @@ function Show-MainMenu {
                 }
             }
             "3" {
-                Clear-TempFiles
                 Write-Host "`nGoodbye!" -ForegroundColor Cyan
                 return
             }
