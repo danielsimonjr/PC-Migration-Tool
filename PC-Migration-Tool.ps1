@@ -926,7 +926,7 @@ function Show-MainMenu {
     Clear-Host
     Write-Host ""
     Write-Host "============================================" -ForegroundColor Cyan
-    Write-Host "  PC MIGRATION TOOLKIT v$($Global:Config.Version)" -ForegroundColor Cyan
+    Write-Host "  PC MIGRATION TOOLKIT" -ForegroundColor Cyan
     Write-Host "============================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "  1. Backup (export packages + user data)" -ForegroundColor Green
@@ -991,41 +991,100 @@ function Start-InteractiveMode {
 # ENTRY POINT
 # ============================================================================
 
+function Select-FolderDialog {
+    param([string]$Description = "Select backup folder")
+
+    Add-Type -AssemblyName System.Windows.Forms
+    $folderBrowser = New-Object System.Windows.Forms.FolderBrowserDialog
+    $folderBrowser.Description = $Description
+    $folderBrowser.ShowNewFolderButton = $true
+
+    $result = $folderBrowser.ShowDialog()
+
+    if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+        return $folderBrowser.SelectedPath
+    }
+    return $null
+}
+
 function Initialize-BackupDrivePrompt {
-    Clear-Host
-    Write-Host ""
-    Write-Host "============================================" -ForegroundColor Cyan
-    Write-Host "  PC MIGRATION TOOLKIT v$($Global:Config.Version)" -ForegroundColor Cyan
-    Write-Host "============================================" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "Where would you like to store backups?" -ForegroundColor White
-    Write-Host ""
-    Write-Host "Examples:" -ForegroundColor Gray
-    Write-Host "  D:\PCMigration" -ForegroundColor Gray
-    Write-Host "  E:\Backup" -ForegroundColor Gray
-    Write-Host "  \\server\share\backup" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "Current default: $($Global:Config.BackupDrive)" -ForegroundColor Yellow
-    Write-Host ""
+    do {
+        Clear-Host
+        Write-Host ""
+        Write-Host "============================================" -ForegroundColor Cyan
+        Write-Host "  PC MIGRATION TOOLKIT" -ForegroundColor Cyan
+        Write-Host "============================================" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "Where would you like to store backups?" -ForegroundColor White
+        Write-Host ""
+        Write-Host "  1. Browse for folder" -ForegroundColor Yellow
+        Write-Host "  2. Enter path manually" -ForegroundColor White
+        Write-Host "  3. Exit" -ForegroundColor Red
+        Write-Host ""
 
-    $newPath = Read-Host "Enter backup path (or press Enter for default)"
+        $choice = Read-Host "Select option (1-3)"
 
-    if (-not [string]::IsNullOrWhiteSpace($newPath)) {
-        $validation = Test-ValidBackupPath -Path $newPath
-        if ($validation.Valid) {
-            $Global:Config.BackupDrive = $newPath
-            Write-Host "Backup path set to: $newPath" -ForegroundColor Green
+        switch ($choice) {
+            "1" {
+                Write-Host "Opening folder browser..." -ForegroundColor Cyan
+                $selectedPath = Select-FolderDialog -Description "Select backup destination folder"
+
+                if ($selectedPath) {
+                    $validation = Test-ValidBackupPath -Path $selectedPath
+                    if ($validation.Valid) {
+                        $Global:Config.BackupDrive = $selectedPath
+                        Write-Host "Backup path set to: $selectedPath" -ForegroundColor Green
+                        Start-Sleep -Seconds 1
+                        return $true
+                    }
+                    else {
+                        Write-Host "Invalid path: $($validation.Reason)" -ForegroundColor Red
+                        Read-Host "`nPress Enter to try again"
+                    }
+                }
+                else {
+                    Write-Host "No folder selected" -ForegroundColor Yellow
+                    Start-Sleep -Seconds 1
+                }
+            }
+            "2" {
+                Write-Host ""
+                Write-Host "Examples:" -ForegroundColor Gray
+                Write-Host "  D:\PCMigration" -ForegroundColor Gray
+                Write-Host "  E:\Backup" -ForegroundColor Gray
+                Write-Host "  \\server\share\backup" -ForegroundColor Gray
+                Write-Host ""
+                Write-Host "Leave blank to go back" -ForegroundColor DarkGray
+                Write-Host ""
+                $newPath = Read-Host "Enter backup path"
+
+                if ([string]::IsNullOrWhiteSpace($newPath)) {
+                    # Return to menu
+                    continue
+                }
+
+                $validation = Test-ValidBackupPath -Path $newPath
+                if ($validation.Valid) {
+                    $Global:Config.BackupDrive = $newPath
+                    Write-Host "Backup path set to: $newPath" -ForegroundColor Green
+                    Start-Sleep -Seconds 1
+                    return $true
+                }
+                else {
+                    Write-Host "Invalid path: $($validation.Reason)" -ForegroundColor Red
+                    Read-Host "`nPress Enter to try again"
+                }
+            }
+            "3" {
+                Write-Host "`nGoodbye!" -ForegroundColor Cyan
+                return $false
+            }
+            default {
+                Write-Host "Invalid option" -ForegroundColor Red
+                Start-Sleep -Seconds 1
+            }
         }
-        else {
-            Write-Host "Invalid path: $($validation.Reason)" -ForegroundColor Red
-            Write-Host "Using default: $($Global:Config.BackupDrive)" -ForegroundColor Yellow
-        }
-    }
-    else {
-        Write-Host "Using default: $($Global:Config.BackupDrive)" -ForegroundColor Green
-    }
-
-    Start-Sleep -Seconds 1
+    } while ($true)
 }
 
 # Verify admin
@@ -1036,6 +1095,8 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 }
 
 # Prompt for backup drive on startup
-Initialize-BackupDrivePrompt
+$continue = Initialize-BackupDrivePrompt
 
-Start-InteractiveMode
+if ($continue) {
+    Start-InteractiveMode
+}
