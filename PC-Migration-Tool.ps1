@@ -287,6 +287,149 @@ function Export-ScoopPackages {
     }
 }
 
+function Install-Winget {
+    Write-Log "Installing Winget..." -Level INFO
+
+    try {
+        # Winget is part of App Installer from Microsoft Store
+        # Try to install via Add-AppxPackage from GitHub releases
+        $progressPreference = 'SilentlyContinue'
+        $latestWinget = Invoke-RestMethod -Uri "https://api.github.com/repos/microsoft/winget-cli/releases/latest"
+        $wingetUrl = $latestWinget.assets | Where-Object { $_.name -match '\.msixbundle$' } | Select-Object -First 1 -ExpandProperty browser_download_url
+
+        if ($wingetUrl) {
+            $wingetPath = Join-Path $env:TEMP "winget.msixbundle"
+            Invoke-WebRequest -Uri $wingetUrl -OutFile $wingetPath
+            Add-AppxPackage -Path $wingetPath -ErrorAction Stop
+            Remove-Item $wingetPath -Force -ErrorAction SilentlyContinue
+            Write-Log "Winget installed successfully" -Level SUCCESS
+            return $true
+        }
+    }
+    catch {
+        Write-Log "Failed to install Winget: $_" -Level ERROR
+        Write-Host "Please install Winget manually from the Microsoft Store (App Installer)" -ForegroundColor Yellow
+    }
+    return $false
+}
+
+function Install-Chocolatey {
+    Write-Log "Installing Chocolatey..." -Level INFO
+
+    try {
+        Set-ExecutionPolicy Bypass -Scope Process -Force
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+        Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+
+        # Refresh environment
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+
+        Write-Log "Chocolatey installed successfully" -Level SUCCESS
+        return $true
+    }
+    catch {
+        Write-Log "Failed to install Chocolatey: $_" -Level ERROR
+    }
+    return $false
+}
+
+function Install-Scoop {
+    Write-Log "Installing Scoop..." -Level INFO
+
+    try {
+        Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+        Invoke-RestMethod get.scoop.sh | Invoke-Expression
+
+        # Refresh environment
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+
+        Write-Log "Scoop installed successfully" -Level SUCCESS
+        return $true
+    }
+    catch {
+        Write-Log "Failed to install Scoop: $_" -Level ERROR
+    }
+    return $false
+}
+
+function Install-RequiredPackageManagers {
+    param([string]$BackupPath)
+
+    $pmPath = Join-Path $BackupPath "PackageManagers"
+    $installed = @()
+
+    # Check what package manager exports exist in backup
+    $hasWinget = Test-Path (Join-Path $pmPath "winget-packages.json")
+    $hasChoco = Test-Path (Join-Path $pmPath "chocolatey-packages.config")
+    $hasScoop = Test-Path (Join-Path $pmPath "scoop-packages.json")
+
+    Write-Host ""
+    Write-Host "Checking package managers..." -ForegroundColor Cyan
+
+    # Check and install Winget
+    if ($hasWinget) {
+        $wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
+        if (-not $wingetCmd) {
+            Write-Host "Winget packages found in backup but Winget is not installed." -ForegroundColor Yellow
+            $install = Read-Host "Install Winget? (Y/N)"
+            if ($install -eq 'Y') {
+                if (Install-Winget) {
+                    $installed += "Winget"
+                }
+            }
+        }
+        else {
+            Write-Host "  Winget: Installed" -ForegroundColor Green
+        }
+    }
+
+    # Check and install Chocolatey
+    if ($hasChoco) {
+        $chocoPath = "$env:ProgramData\chocolatey\bin\choco.exe"
+        if (-not (Test-Path $chocoPath)) {
+            Write-Host "Chocolatey packages found in backup but Chocolatey is not installed." -ForegroundColor Yellow
+            $install = Read-Host "Install Chocolatey? (Y/N)"
+            if ($install -eq 'Y') {
+                if (Install-Chocolatey) {
+                    $installed += "Chocolatey"
+                }
+            }
+        }
+        else {
+            Write-Host "  Chocolatey: Installed" -ForegroundColor Green
+        }
+    }
+
+    # Check and install Scoop
+    if ($hasScoop) {
+        $scoopCmd = Get-Command scoop -ErrorAction SilentlyContinue
+        if (-not $scoopCmd) {
+            Write-Host "Scoop packages found in backup but Scoop is not installed." -ForegroundColor Yellow
+            $install = Read-Host "Install Scoop? (Y/N)"
+            if ($install -eq 'Y') {
+                if (Install-Scoop) {
+                    $installed += "Scoop"
+                }
+            }
+        }
+        else {
+            Write-Host "  Scoop: Installed" -ForegroundColor Green
+        }
+    }
+
+    if ($installed.Count -gt 0) {
+        Write-Log "Installed package managers: $($installed -join ', ')" -Level SUCCESS
+        Write-Host ""
+        Write-Host "Package managers installed. You may need to restart PowerShell for changes to take effect." -ForegroundColor Yellow
+        $restart = Read-Host "Restart restore process? (Y/N)"
+        if ($restart -eq 'Y') {
+            return $false  # Signal to restart
+        }
+    }
+
+    return $true  # Continue with restore
+}
+
 function Import-WingetPackages {
     param([string]$BackupPath)
 
@@ -299,7 +442,7 @@ function Import-WingetPackages {
 
     $wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
     if (-not $wingetCmd) {
-        Write-Log "Winget not available - install it first" -Level ERROR
+        Write-Log "Winget not available - skipping" -Level WARNING
         return
     }
 
@@ -856,6 +999,13 @@ function Start-Restore {
     }
 
     $startTime = Get-Date
+
+    # Check and install missing package managers
+    $continueRestore = Install-RequiredPackageManagers -BackupPath $BackupPath
+    if (-not $continueRestore) {
+        Write-Log "Restore paused - please restart after package managers are installed" -Level INFO
+        return
+    }
 
     # Restore packages
     Write-Host ""
