@@ -77,6 +77,218 @@ $Global:Config = @{
 $Global:ExeFolder = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent ([Environment]::GetCommandLineArgs()[0]) }
 if (-not $Global:ExeFolder -or $Global:ExeFolder -eq "") { $Global:ExeFolder = (Get-Location).Path }
 
+# Progress tracking for resume capability
+$Global:Progress = @{
+    Operation = $null          # "backup" or "restore"
+    StartTime = $null
+    CompletedSteps = @()       # List of completed step names
+    CurrentStep = $null        # Current step being processed
+    Checksums = @{}            # File checksums for verification
+    Interrupted = $false       # Flag for graceful interruption
+}
+
+# ============================================================================
+# PROGRESS TRACKING & RESUME
+# ============================================================================
+
+function Save-Progress {
+    param([string]$BackupPath)
+
+    $progressFile = Join-Path $BackupPath "backup-progress.json"
+    $progressData = @{
+        Operation = $Global:Progress.Operation
+        StartTime = $Global:Progress.StartTime
+        LastUpdate = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        CompletedSteps = $Global:Progress.CompletedSteps
+        CurrentStep = $Global:Progress.CurrentStep
+        ComputerName = $env:COMPUTERNAME
+        UserName = $env:USERNAME
+    }
+
+    try {
+        $progressData | ConvertTo-Json -Depth 5 | Out-File -FilePath $progressFile -Encoding UTF8 -Force
+    }
+    catch {
+        Write-Log "Could not save progress: $_" -Level WARNING
+    }
+}
+
+function Get-SavedProgress {
+    param([string]$BackupPath)
+
+    $progressFile = Join-Path $BackupPath "backup-progress.json"
+
+    if (Test-Path $progressFile) {
+        try {
+            $progress = Get-Content $progressFile -Raw | ConvertFrom-Json
+            return $progress
+        }
+        catch {
+            return $null
+        }
+    }
+    return $null
+}
+
+function Clear-Progress {
+    param([string]$BackupPath)
+
+    $progressFile = Join-Path $BackupPath "backup-progress.json"
+    if (Test-Path $progressFile) {
+        Remove-Item $progressFile -Force -ErrorAction SilentlyContinue
+    }
+
+    $Global:Progress.CompletedSteps = @()
+    $Global:Progress.CurrentStep = $null
+}
+
+function Mark-StepComplete {
+    param(
+        [string]$StepName,
+        [string]$BackupPath
+    )
+
+    if ($StepName -notin $Global:Progress.CompletedSteps) {
+        $Global:Progress.CompletedSteps += $StepName
+    }
+    $Global:Progress.CurrentStep = $null
+    Save-Progress -BackupPath $BackupPath
+
+    Write-Host "  [OK] $StepName complete - safe to close" -ForegroundColor DarkGreen
+}
+
+function Test-StepCompleted {
+    param([string]$StepName)
+
+    return $StepName -in $Global:Progress.CompletedSteps
+}
+
+function Set-CurrentStep {
+    param(
+        [string]$StepName,
+        [string]$BackupPath
+    )
+
+    $Global:Progress.CurrentStep = $StepName
+    Save-Progress -BackupPath $BackupPath
+}
+
+# ============================================================================
+# CHECKSUM VERIFICATION
+# ============================================================================
+
+function Get-FileChecksum {
+    param([string]$FilePath)
+
+    try {
+        $hash = Get-FileHash -Path $FilePath -Algorithm MD5 -ErrorAction Stop
+        return $hash.Hash
+    }
+    catch {
+        return $null
+    }
+}
+
+function Save-Checksums {
+    param(
+        [string]$BackupPath,
+        [hashtable]$Checksums
+    )
+
+    $checksumFile = Join-Path $BackupPath "checksums.json"
+    try {
+        $Checksums | ConvertTo-Json -Depth 5 | Out-File -FilePath $checksumFile -Encoding UTF8 -Force
+        Write-Log "Saved checksums for $($Checksums.Count) files" -Level INFO
+    }
+    catch {
+        Write-Log "Could not save checksums: $_" -Level WARNING
+    }
+}
+
+function Get-SavedChecksums {
+    param([string]$BackupPath)
+
+    $checksumFile = Join-Path $BackupPath "checksums.json"
+
+    if (Test-Path $checksumFile) {
+        try {
+            $content = Get-Content $checksumFile -Raw | ConvertFrom-Json
+            $checksums = @{}
+            $content.PSObject.Properties | ForEach-Object {
+                $checksums[$_.Name] = $_.Value
+            }
+            return $checksums
+        }
+        catch {
+            return @{}
+        }
+    }
+    return @{}
+}
+
+function Test-BackupIntegrity {
+    param([string]$BackupPath)
+
+    $savedChecksums = Get-SavedChecksums -BackupPath $BackupPath
+
+    if ($savedChecksums.Count -eq 0) {
+        return @{ Verified = $false; FilesChecked = 0; Errors = @("No checksums found") }
+    }
+
+    $errors = @()
+    $filesChecked = 0
+
+    foreach ($relativePath in $savedChecksums.Keys) {
+        $fullPath = Join-Path $BackupPath $relativePath
+
+        if (-not (Test-Path $fullPath)) {
+            $errors += "Missing: $relativePath"
+            continue
+        }
+
+        $currentHash = Get-FileChecksum -FilePath $fullPath
+        if ($currentHash -ne $savedChecksums[$relativePath]) {
+            $errors += "Corrupted: $relativePath"
+        }
+        $filesChecked++
+    }
+
+    return @{
+        Verified = ($errors.Count -eq 0)
+        FilesChecked = $filesChecked
+        Errors = $errors
+    }
+}
+
+# ============================================================================
+# GRACEFUL INTERRUPTION
+# ============================================================================
+
+function Register-InterruptHandler {
+    param([string]$BackupPath)
+
+    # Register Ctrl+C handler
+    [Console]::TreatControlCAsInput = $false
+
+    $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
+        if ($Global:Progress.CurrentStep) {
+            Write-Host "`n`nInterrupted during: $($Global:Progress.CurrentStep)" -ForegroundColor Yellow
+            Write-Host "Progress saved. You can resume next time." -ForegroundColor Yellow
+        }
+    } -SupportEvent
+}
+
+function Show-InterruptMessage {
+    Write-Host ""
+    Write-Host "============================================" -ForegroundColor Yellow
+    Write-Host "  OPERATION INTERRUPTED" -ForegroundColor Yellow
+    Write-Host "============================================" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Your progress has been saved." -ForegroundColor White
+    Write-Host "Run the tool again to resume where you left off." -ForegroundColor White
+    Write-Host ""
+}
+
 # ============================================================================
 # LOGGING
 # ============================================================================
@@ -869,23 +1081,71 @@ function Export-Inventory {
 # ============================================================================
 
 function Start-Backup {
+    param([switch]$Resume)
+
+    $backupPath = $Global:Config.BackupDrive
+
     Write-Host ""
     Write-Host "============================================" -ForegroundColor Cyan
     Write-Host "  PC MIGRATION BACKUP" -ForegroundColor Cyan
     Write-Host "============================================" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "This will:" -ForegroundColor White
-    Write-Host "  1. Export Winget/Chocolatey/Scoop package lists" -ForegroundColor Gray
-    Write-Host "  2. Backup user data (Documents, Desktop, etc.)" -ForegroundColor Gray
-    Write-Host "  3. Create an inventory of installed apps (reference only)" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "Backup location: $($Global:Config.BackupDrive)" -ForegroundColor Yellow
-    Write-Host ""
 
-    $confirm = Read-Host "Start backup? (Y/N)"
-    if ($confirm -ne 'Y') {
-        Write-Log "Backup cancelled" -Level INFO
-        return
+    # Check for existing progress
+    $savedProgress = Get-SavedProgress -BackupPath $backupPath
+    if ($savedProgress -and $savedProgress.Operation -eq "backup" -and -not $Resume) {
+        Write-Host "INCOMPLETE BACKUP FOUND" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "  Started:   $($savedProgress.StartTime)" -ForegroundColor Gray
+        Write-Host "  Last save: $($savedProgress.LastUpdate)" -ForegroundColor Gray
+        Write-Host "  Completed: $($savedProgress.CompletedSteps.Count) steps" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "  1. Resume where you left off" -ForegroundColor Green
+        Write-Host "  2. Start fresh (delete previous progress)" -ForegroundColor Yellow
+        Write-Host "  3. Cancel" -ForegroundColor Red
+        Write-Host ""
+
+        $resumeChoice = Read-Host "Select option (1-3)"
+
+        switch ($resumeChoice) {
+            "1" {
+                $Global:Progress.Operation = "backup"
+                $Global:Progress.StartTime = $savedProgress.StartTime
+                $Global:Progress.CompletedSteps = @($savedProgress.CompletedSteps)
+                Write-Host ""
+                Write-Host "Resuming backup..." -ForegroundColor Green
+            }
+            "2" {
+                Clear-Progress -BackupPath $backupPath
+                Write-Host ""
+                Write-Host "Starting fresh backup..." -ForegroundColor Green
+            }
+            default {
+                Write-Log "Backup cancelled" -Level INFO
+                return
+            }
+        }
+    }
+    else {
+        Write-Host "This will:" -ForegroundColor White
+        Write-Host "  1. Export Winget/Chocolatey/Scoop package lists" -ForegroundColor Gray
+        Write-Host "  2. Backup user data (Documents, Desktop, etc.)" -ForegroundColor Gray
+        Write-Host "  3. Create an inventory of installed apps (reference only)" -ForegroundColor Gray
+        Write-Host "  4. Create checksums for verification" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "Backup location: $backupPath" -ForegroundColor Yellow
+        Write-Host ""
+
+        $confirm = Read-Host "Start backup? (Y/N)"
+        if ($confirm -ne 'Y') {
+            Write-Log "Backup cancelled" -Level INFO
+            return
+        }
+
+        # Initialize progress
+        $Global:Progress.Operation = "backup"
+        $Global:Progress.StartTime = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        $Global:Progress.CompletedSteps = @()
     }
 
     $startTime = Get-Date
@@ -897,10 +1157,7 @@ function Start-Backup {
 
     # Check disk space (handle both local and UNC paths)
     try {
-        $backupPath = $Global:Config.BackupDrive
         if ($backupPath -match '^\\\\') {
-            # UNC path - use Get-WmiObject for network shares
-            $freeSpace = $null
             Write-Log "UNC path detected - skipping disk space check" -Level INFO
         }
         elseif ($backupPath -match '^([A-Za-z]):') {
@@ -913,34 +1170,107 @@ function Start-Backup {
     }
     catch { }
 
-    # Export package managers
+    # Initialize checksums hashtable
+    $checksums = @{}
+
+    # Export package managers (with progress tracking)
     Write-Host ""
     Write-Host "--- Package Managers ---" -ForegroundColor Cyan
-    Export-WingetPackages
-    Export-ChocolateyPackages
-    Export-ScoopPackages
 
-    # Backup user data
+    if (-not (Test-StepCompleted -StepName "Winget")) {
+        Set-CurrentStep -StepName "Winget" -BackupPath $backupPath
+        Export-WingetPackages
+        Mark-StepComplete -StepName "Winget" -BackupPath $backupPath
+    } else {
+        Write-Host "  [SKIP] Winget - already completed" -ForegroundColor DarkGray
+    }
+
+    if (-not (Test-StepCompleted -StepName "Chocolatey")) {
+        Set-CurrentStep -StepName "Chocolatey" -BackupPath $backupPath
+        Export-ChocolateyPackages
+        Mark-StepComplete -StepName "Chocolatey" -BackupPath $backupPath
+    } else {
+        Write-Host "  [SKIP] Chocolatey - already completed" -ForegroundColor DarkGray
+    }
+
+    if (-not (Test-StepCompleted -StepName "Scoop")) {
+        Set-CurrentStep -StepName "Scoop" -BackupPath $backupPath
+        Export-ScoopPackages
+        Mark-StepComplete -StepName "Scoop" -BackupPath $backupPath
+    } else {
+        Write-Host "  [SKIP] Scoop - already completed" -ForegroundColor DarkGray
+    }
+
+    # Backup user data (with progress tracking)
     Write-Host ""
     Write-Host "--- User Data ---" -ForegroundColor Cyan
-    Backup-UserData
+
+    if (-not (Test-StepCompleted -StepName "UserData")) {
+        Set-CurrentStep -StepName "UserData" -BackupPath $backupPath
+        Backup-UserData
+        Mark-StepComplete -StepName "UserData" -BackupPath $backupPath
+    } else {
+        Write-Host "  [SKIP] UserData - already completed" -ForegroundColor DarkGray
+    }
 
     # Create inventory
     Write-Host ""
     Write-Host "--- Inventory ---" -ForegroundColor Cyan
-    Export-Inventory
+
+    if (-not (Test-StepCompleted -StepName "Inventory")) {
+        Set-CurrentStep -StepName "Inventory" -BackupPath $backupPath
+        Export-Inventory
+        Mark-StepComplete -StepName "Inventory" -BackupPath $backupPath
+    } else {
+        Write-Host "  [SKIP] Inventory - already completed" -ForegroundColor DarkGray
+    }
+
+    # Generate checksums for key files
+    Write-Host ""
+    Write-Host "--- Verification ---" -ForegroundColor Cyan
+
+    if (-not (Test-StepCompleted -StepName "Checksums")) {
+        Set-CurrentStep -StepName "Checksums" -BackupPath $backupPath
+        Write-Host "Generating checksums for verification..." -ForegroundColor Gray
+
+        # Checksum package manager exports
+        $pmPath = Join-Path $backupPath "PackageManagers"
+        if (Test-Path $pmPath) {
+            Get-ChildItem $pmPath -File | ForEach-Object {
+                $relativePath = "PackageManagers\$($_.Name)"
+                $hash = Get-FileChecksum -FilePath $_.FullName
+                if ($hash) { $checksums[$relativePath] = $hash }
+            }
+        }
+
+        # Checksum inventory
+        $inventoryPath = Join-Path $backupPath "inventory.json"
+        if (Test-Path $inventoryPath) {
+            $hash = Get-FileChecksum -FilePath $inventoryPath
+            if ($hash) { $checksums["inventory.json"] = $hash }
+        }
+
+        Save-Checksums -BackupPath $backupPath -Checksums $checksums
+        Mark-StepComplete -StepName "Checksums" -BackupPath $backupPath
+    } else {
+        Write-Host "  [SKIP] Checksums - already completed" -ForegroundColor DarkGray
+    }
 
     # Create backup manifest (so restore can identify this as a valid backup)
     $manifest = @{
-        Version = "3.0"
+        Version = $Global:Config.Version
         BackupDate = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
         ComputerName = $env:COMPUTERNAME
         UserName = $env:USERNAME
         WindowsVersion = (Get-CimInstance Win32_OperatingSystem).Caption
+        CompletedSteps = $Global:Progress.CompletedSteps
     }
-    $manifestPath = Join-Path $Global:Config.BackupDrive "backup-manifest.json"
+    $manifestPath = Join-Path $backupPath "backup-manifest.json"
     $manifest | ConvertTo-Json | Out-File -FilePath $manifestPath -Encoding UTF8
     Write-Log "Created backup manifest" -Level INFO
+
+    # Clear progress file on successful completion
+    Clear-Progress -BackupPath $backupPath
 
     $duration = (Get-Date) - $startTime
 
@@ -949,11 +1279,11 @@ function Start-Backup {
     Write-Host "  BACKUP COMPLETE" -ForegroundColor Green
     Write-Host "============================================" -ForegroundColor Green
     Write-Host "Duration: $($duration.Minutes)m $($duration.Seconds)s" -ForegroundColor Gray
-    Write-Host "Location: $($Global:Config.BackupDrive)" -ForegroundColor Gray
+    Write-Host "Location: $backupPath" -ForegroundColor Gray
     Write-Host ""
     Write-Host "NEXT STEPS:" -ForegroundColor Yellow
     Write-Host "  1. Copy backup folder to new PC" -ForegroundColor White
-    Write-Host "  2. Run this script on new PC" -ForegroundColor White
+    Write-Host "  2. Run this tool on new PC" -ForegroundColor White
     Write-Host "  3. Choose 'Restore' option" -ForegroundColor White
     Write-Host ""
 }
@@ -997,44 +1327,132 @@ function Start-Restore {
         Write-Host "WARNING: Could not read backup info" -ForegroundColor Yellow
     }
 
-    Write-Host "This will:" -ForegroundColor White
-    Write-Host "  - Reinstall your apps (fresh installs)" -ForegroundColor Gray
-    Write-Host "  - Copy your files back (Documents, Desktop, etc.)" -ForegroundColor Gray
-    Write-Host ""
+    # Check for existing restore progress
+    $savedProgress = Get-SavedProgress -BackupPath $BackupPath
+    if ($savedProgress -and $savedProgress.Operation -eq "restore") {
+        Write-Host "INCOMPLETE RESTORE FOUND" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "  Started:   $($savedProgress.StartTime)" -ForegroundColor Gray
+        Write-Host "  Last save: $($savedProgress.LastUpdate)" -ForegroundColor Gray
+        Write-Host "  Completed: $($savedProgress.CompletedSteps.Count) steps" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "  1. Resume where you left off" -ForegroundColor Green
+        Write-Host "  2. Start fresh (redo everything)" -ForegroundColor Yellow
+        Write-Host "  3. Cancel" -ForegroundColor Red
+        Write-Host ""
 
-    # Show what will be restored
-    $pmPath = Join-Path $BackupPath "PackageManagers"
-    $wingetFile = Join-Path $pmPath "winget-packages.json"
-    $chocoFile = Join-Path $pmPath "chocolatey-packages.config"
-    $scoopFile = Join-Path $pmPath "scoop-packages.json"
+        $resumeChoice = Read-Host "Select option (1-3)"
 
-    if (Test-Path $wingetFile) {
-        $content = Get-Content $wingetFile -Raw | ConvertFrom-Json
-        Write-Host "  Winget packages: $($content.Sources.Packages.Count)" -ForegroundColor Gray
+        switch ($resumeChoice) {
+            "1" {
+                $Global:Progress.Operation = "restore"
+                $Global:Progress.StartTime = $savedProgress.StartTime
+                $Global:Progress.CompletedSteps = @($savedProgress.CompletedSteps)
+                Write-Host ""
+                Write-Host "Resuming restore..." -ForegroundColor Green
+            }
+            "2" {
+                Clear-Progress -BackupPath $BackupPath
+                $Global:Progress.Operation = "restore"
+                $Global:Progress.StartTime = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+                $Global:Progress.CompletedSteps = @()
+                Write-Host ""
+                Write-Host "Starting fresh restore..." -ForegroundColor Green
+            }
+            default {
+                Write-Log "Restore cancelled" -Level INFO
+                return
+            }
+        }
     }
-    if (Test-Path $chocoFile) {
-        [xml]$content = Get-Content $chocoFile
-        Write-Host "  Chocolatey packages: $($content.packages.package.Count)" -ForegroundColor Gray
-    }
-    if (Test-Path $scoopFile) {
-        $content = Get-Content $scoopFile | ConvertFrom-Json
-        Write-Host "  Scoop packages: $($content.Count)" -ForegroundColor Gray
-    }
+    else {
+        Write-Host "This will:" -ForegroundColor White
+        Write-Host "  - Reinstall your apps (fresh installs)" -ForegroundColor Gray
+        Write-Host "  - Copy your files back (Documents, Desktop, etc.)" -ForegroundColor Gray
+        Write-Host "  - Verify backup integrity" -ForegroundColor Gray
+        Write-Host ""
 
-    Write-Host ""
-    $confirm = Read-Host "Start restore? (Y/N)"
-    if ($confirm -ne 'Y') {
-        Write-Log "Restore cancelled" -Level INFO
-        return
+        # Show what will be restored
+        $pmPath = Join-Path $BackupPath "PackageManagers"
+        $wingetFile = Join-Path $pmPath "winget-packages.json"
+        $chocoFile = Join-Path $pmPath "chocolatey-packages.config"
+        $scoopFile = Join-Path $pmPath "scoop-packages.json"
+
+        if (Test-Path $wingetFile) {
+            try {
+                $content = Get-Content $wingetFile -Raw | ConvertFrom-Json
+                Write-Host "  Winget packages: $($content.Sources.Packages.Count)" -ForegroundColor Gray
+            } catch { }
+        }
+        if (Test-Path $chocoFile) {
+            try {
+                [xml]$content = Get-Content $chocoFile
+                Write-Host "  Chocolatey packages: $($content.packages.package.Count)" -ForegroundColor Gray
+            } catch { }
+        }
+        if (Test-Path $scoopFile) {
+            try {
+                $content = Get-Content $scoopFile | ConvertFrom-Json
+                Write-Host "  Scoop packages: $($content.Count)" -ForegroundColor Gray
+            } catch { }
+        }
+
+        Write-Host ""
+        $confirm = Read-Host "Start restore? (Y/N)"
+        if ($confirm -ne 'Y') {
+            Write-Log "Restore cancelled" -Level INFO
+            return
+        }
+
+        # Initialize progress
+        $Global:Progress.Operation = "restore"
+        $Global:Progress.StartTime = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        $Global:Progress.CompletedSteps = @()
     }
 
     $startTime = Get-Date
 
+    # Verify backup integrity first
+    Write-Host ""
+    Write-Host "--- Verifying Backup ---" -ForegroundColor Cyan
+
+    if (-not (Test-StepCompleted -StepName "Verification")) {
+        Set-CurrentStep -StepName "Verification" -BackupPath $BackupPath
+        $integrity = Test-BackupIntegrity -BackupPath $BackupPath
+
+        if ($integrity.FilesChecked -gt 0) {
+            if ($integrity.Verified) {
+                Write-Host "  Backup verified: $($integrity.FilesChecked) files OK" -ForegroundColor Green
+            }
+            else {
+                Write-Host "  WARNING: Some files may be corrupted" -ForegroundColor Yellow
+                foreach ($err in $integrity.Errors | Select-Object -First 5) {
+                    Write-Host "    - $err" -ForegroundColor Yellow
+                }
+                $continueAnyway = Read-Host "Continue anyway? (Y/N)"
+                if ($continueAnyway -ne 'Y') {
+                    Write-Log "Restore cancelled due to verification errors" -Level WARNING
+                    return
+                }
+            }
+        }
+        else {
+            Write-Host "  No checksums found (older backup) - skipping verification" -ForegroundColor Gray
+        }
+        Mark-StepComplete -StepName "Verification" -BackupPath $BackupPath
+    } else {
+        Write-Host "  [SKIP] Verification - already completed" -ForegroundColor DarkGray
+    }
+
     # Check and install missing package managers
-    $continueRestore = Install-RequiredPackageManagers -BackupPath $BackupPath
-    if (-not $continueRestore) {
-        Write-Log "Restore paused - please restart after package managers are installed" -Level INFO
-        return
+    if (-not (Test-StepCompleted -StepName "PackageManagers")) {
+        Set-CurrentStep -StepName "PackageManagers" -BackupPath $BackupPath
+        $continueRestore = Install-RequiredPackageManagers -BackupPath $BackupPath
+        if (-not $continueRestore) {
+            Write-Log "Restore paused - please restart after package managers are installed" -Level INFO
+            return
+        }
+        Mark-StepComplete -StepName "PackageManagers" -BackupPath $BackupPath
     }
 
     # Restore packages
@@ -1043,14 +1461,44 @@ function Start-Restore {
     Write-Host "(This may take a while...)" -ForegroundColor Gray
     Write-Host ""
 
-    Import-WingetPackages -BackupPath $BackupPath
-    Import-ChocolateyPackages -BackupPath $BackupPath
-    Import-ScoopPackages -BackupPath $BackupPath
+    if (-not (Test-StepCompleted -StepName "RestoreWinget")) {
+        Set-CurrentStep -StepName "RestoreWinget" -BackupPath $BackupPath
+        Import-WingetPackages -BackupPath $BackupPath
+        Mark-StepComplete -StepName "RestoreWinget" -BackupPath $BackupPath
+    } else {
+        Write-Host "  [SKIP] Winget - already completed" -ForegroundColor DarkGray
+    }
+
+    if (-not (Test-StepCompleted -StepName "RestoreChocolatey")) {
+        Set-CurrentStep -StepName "RestoreChocolatey" -BackupPath $BackupPath
+        Import-ChocolateyPackages -BackupPath $BackupPath
+        Mark-StepComplete -StepName "RestoreChocolatey" -BackupPath $BackupPath
+    } else {
+        Write-Host "  [SKIP] Chocolatey - already completed" -ForegroundColor DarkGray
+    }
+
+    if (-not (Test-StepCompleted -StepName "RestoreScoop")) {
+        Set-CurrentStep -StepName "RestoreScoop" -BackupPath $BackupPath
+        Import-ScoopPackages -BackupPath $BackupPath
+        Mark-StepComplete -StepName "RestoreScoop" -BackupPath $BackupPath
+    } else {
+        Write-Host "  [SKIP] Scoop - already completed" -ForegroundColor DarkGray
+    }
 
     # Restore user data
     Write-Host ""
     Write-Host "--- User Data ---" -ForegroundColor Cyan
-    Restore-UserData -BackupPath $BackupPath
+
+    if (-not (Test-StepCompleted -StepName "RestoreUserData")) {
+        Set-CurrentStep -StepName "RestoreUserData" -BackupPath $BackupPath
+        Restore-UserData -BackupPath $BackupPath
+        Mark-StepComplete -StepName "RestoreUserData" -BackupPath $BackupPath
+    } else {
+        Write-Host "  [SKIP] UserData - already completed" -ForegroundColor DarkGray
+    }
+
+    # Clear progress on successful completion
+    Clear-Progress -BackupPath $BackupPath
 
     $duration = (Get-Date) - $startTime
 

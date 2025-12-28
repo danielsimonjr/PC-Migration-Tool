@@ -45,7 +45,7 @@ Auto-detects `backup-manifest.json` in exe folder:
 
 ## Architecture
 
-Single PowerShell file (~1400 lines) organized into sections:
+Single PowerShell file (~1600 lines) organized into sections:
 
 ### Configuration (Lines 32-74)
 - `BackupDrive` - Target path (set during backup)
@@ -54,8 +54,19 @@ Single PowerShell file (~1400 lines) organized into sections:
 - `AppDataFolders` - AppData subfolders to backup (VS Code settings, etc.)
 - `ExcludePatterns` - Skip node_modules, .git/objects, etc.
 
-### Global Variables (Lines 76-78)
+### Global Variables (Lines 76-88)
 - `$Global:ExeFolder` - Detected at startup, works with PS2EXE compiled exe
+- `$Global:Progress` - Tracks operation progress for resume capability
+
+### Progress Tracking & Resume (Lines 90-175)
+- `Save-Progress` / `Get-SavedProgress` - Persist progress to `backup-progress.json`
+- `Mark-StepComplete` / `Test-StepCompleted` - Track completed steps
+- `Clear-Progress` - Remove progress file on successful completion
+
+### Checksum Verification (Lines 177-261)
+- `Get-FileChecksum` - MD5 hash of files
+- `Save-Checksums` / `Get-SavedChecksums` - Store in `checksums.json`
+- `Test-BackupIntegrity` - Verify files match checksums
 
 ### Package Manager Functions
 - `Export-WingetPackages` / `Import-WingetPackages` - Uses native `winget export/import`
@@ -85,6 +96,8 @@ BackupLocation/
 │   ├── Desktop/
 │   └── AppData/
 ├── backup-manifest.json    ← Identifies valid backup, shows source PC info
+├── backup-progress.json    ← Progress tracking (deleted on completion)
+├── checksums.json          ← File verification hashes
 ├── inventory.json
 └── migration.log
 ```
@@ -93,15 +106,26 @@ BackupLocation/
 
 1. **Simple 3-option main menu** - Backup, Restore, Exit (wife-friendly)
 2. **Auto-detect backup on restore** - Looks for `backup-manifest.json` in exe folder
-3. **No file copying for apps** - Apps need proper installation via package managers
-4. **Uses native package manager exports** - `winget export` produces correct import format
-5. **Robocopy for user data** - Reliable, multithreaded, handles long paths
+3. **Resume capability** - Detects incomplete backups/restores and offers to continue
+4. **Checksum verification** - Verifies files weren't corrupted during transfer
+5. **No file copying for apps** - Apps need proper installation via package managers
+6. **Uses native package manager exports** - `winget export` produces correct import format
+7. **Robocopy for user data** - Reliable, multithreaded, handles long paths
+
+## Resume Feature
+
+If backup/restore is interrupted:
+- Progress saved to `backup-progress.json` after each step
+- On restart, user sees: "INCOMPLETE BACKUP/RESTORE FOUND"
+- Options: Resume, Start fresh, Cancel
+- Shows "[SKIP]" for already completed steps
 
 ## Security Features
 
 - `Test-ValidBackupPath` - Blocks system directories, relative paths, user profile root
 - `SensitiveFolders` - Prompts user with red warning before backing up `.ssh`
 - `backup-manifest.json` - Identifies valid backups and shows source PC info
+- `checksums.json` - Verifies backup integrity before restore
 
 ## PS2EXE Considerations
 

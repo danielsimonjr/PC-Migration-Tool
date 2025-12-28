@@ -7,6 +7,8 @@ A simple tool for migrating to a new PC. Designed for non-technical users.
 1. **Exports package manager lists** (Winget, Chocolatey, Scoop) so apps can be properly reinstalled
 2. **Backs up user data** (Documents, Desktop, Downloads, Pictures, Videos, Music, AppData settings)
 3. **Creates an inventory** of installed apps (for reference)
+4. **Tracks progress** so you can resume if interrupted
+5. **Verifies backup integrity** with checksums
 
 ## What This Tool Does NOT Do
 
@@ -21,7 +23,7 @@ A simple tool for migrating to a new PC. Designed for non-technical users.
 2. Run the exe (right-click → Run as Administrator)
 3. Select **1. BACKUP**
 4. Select **1. Use this folder** (saves backup to USB)
-5. Wait for completion
+5. Wait for completion (safe to close after each step completes)
 
 ### On New PC
 1. Plug in USB drive with backup
@@ -31,6 +33,13 @@ A simple tool for migrating to a new PC. Designed for non-technical users.
 5. Select **1. Run Restore**
 6. Wait for apps to install and files to copy
 7. Restart computer
+
+## Resume Feature
+
+If backup or restore is interrupted (power loss, closed window, etc.):
+- Progress is automatically saved after each step
+- Run the tool again and it will ask: **Resume or Start Fresh?**
+- Already completed steps are skipped
 
 ## Menu Structure
 
@@ -79,6 +88,7 @@ BackupLocation\
 │   ├── Downloads\
 │   └── AppData\
 ├── backup-manifest.json          # Identifies valid backup
+├── checksums.json                # File verification hashes
 ├── inventory.json                # App list (reference only)
 └── migration.log
 ```
@@ -96,8 +106,19 @@ Check `inventory.json` after restore. It lists all apps that were installed. For
 - Download installer from vendor website
 - Some apps may need license reactivation
 
-## Security Features
+## Features
 
+### Resume Capability
+- Progress saved after each step
+- Detect incomplete backup/restore on startup
+- Option to resume or start fresh
+
+### Integrity Verification
+- Checksums generated during backup
+- Verified before restore begins
+- Warns if files are corrupted
+
+### Security
 - **Sensitive folders** (`.ssh`) require explicit confirmation before backup
 - **Path validation** blocks system directories
 - **Backup manifest** identifies valid backups and shows source PC info
