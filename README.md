@@ -1,6 +1,6 @@
 # PC Migration Toolkit
 
-A simple tool for migrating to a new PC. Designed for non-technical users.
+A simple tool for migrating to a new PC. Features both a menu-driven interface for non-technical users and CLI mode for power users.
 
 ## What This Tool Does
 
@@ -41,7 +41,38 @@ If backup or restore is interrupted (power loss, closed window, etc.):
 - Run the tool again and it will ask: **Resume or Start Fresh?**
 - Already completed steps are skipped
 
-## Menu Structure
+## CLI Mode (Power Users)
+
+```powershell
+# Backup to a specific path
+.\PC-Migration-Tool.ps1 backup -Path D:\Backup
+
+# Backup without confirmation prompt
+.\PC-Migration-Tool.ps1 backup -Path D:\Backup -y
+
+# Restore from backup
+.\PC-Migration-Tool.ps1 restore -Path D:\Backup
+
+# Verify backup integrity
+.\PC-Migration-Tool.ps1 verify -Path D:\Backup
+
+# View inventory of backed-up apps
+.\PC-Migration-Tool.ps1 inventory -Path D:\Backup
+
+# Show help
+.\PC-Migration-Tool.ps1 -Help
+```
+
+### CLI Options
+| Option | Alias | Description |
+|--------|-------|-------------|
+| `-Path` | `-p` | Backup/restore path (required) |
+| `-Yes` | `-y` | Skip confirmation prompts |
+| `-Help` | `-h` | Show help message |
+
+## Interactive Mode (Menu-Driven)
+
+Run without arguments for the menu interface:
 
 ### Main Menu
 ```

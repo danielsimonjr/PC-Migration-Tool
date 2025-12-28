@@ -1,5 +1,5 @@
 # ============================================================================
-# PC MIGRATION TOOLKIT v3.2
+# PC MIGRATION TOOLKIT v3.3
 # Honest PC Migration: Package Managers + User Data
 #
 # Created for: Daniel Simon Jr. - Systems Engineer
@@ -20,7 +20,33 @@
 #   3. Run restore (imports packages via winget/choco, copies user data)
 #   4. Apps reinstall properly through their real installers
 #
+# CLI USAGE:
+#   .\PC-Migration-Tool.ps1 backup -Path D:\Backup
+#   .\PC-Migration-Tool.ps1 restore -Path D:\Backup
+#   .\PC-Migration-Tool.ps1 verify -Path D:\Backup
+#   .\PC-Migration-Tool.ps1 inventory -Path D:\Backup
+#   .\PC-Migration-Tool.ps1 -Help
+#
 # ============================================================================
+
+[CmdletBinding()]
+param(
+    [Parameter(Position=0)]
+    [ValidateSet("backup", "restore", "verify", "inventory", "")]
+    [string]$Command = "",
+
+    [Parameter()]
+    [Alias("p")]
+    [string]$Path = "",
+
+    [Parameter()]
+    [Alias("y")]
+    [switch]$Yes,
+
+    [Parameter()]
+    [Alias("h", "?")]
+    [switch]$Help
+)
 
 #Requires -RunAsAdministrator
 #Requires -Version 5.1
@@ -32,7 +58,7 @@
 $Global:Config = @{
     BackupDrive         = "D:\PCMigration"
     LogFile             = "migration.log"
-    Version             = "3.2"
+    Version             = "3.3"
 
     # User data folders to backup (relative to user profile)
     UserDataFolders     = @(
@@ -1827,6 +1853,301 @@ function Show-MainMenu {
     } while ($true)
 }
 
+# ============================================================================
+# CLI MODE
+# ============================================================================
+
+function Show-Help {
+    Write-Host ""
+    Write-Host "PC MIGRATION TOOLKIT v$($Global:Config.Version)" -ForegroundColor Cyan
+    Write-Host "======================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "USAGE:" -ForegroundColor Yellow
+    Write-Host "  .\PC-Migration-Tool.ps1 [command] [options]"
+    Write-Host ""
+    Write-Host "COMMANDS:" -ForegroundColor Yellow
+    Write-Host "  backup      Export packages and backup user data"
+    Write-Host "  restore     Import packages and restore user data"
+    Write-Host "  verify      Verify backup integrity (checksums)"
+    Write-Host "  inventory   Show installed applications from backup"
+    Write-Host ""
+    Write-Host "OPTIONS:" -ForegroundColor Yellow
+    Write-Host "  -Path, -p   Backup/restore path (required for CLI mode)"
+    Write-Host "  -Yes, -y    Skip confirmation prompts"
+    Write-Host "  -Help, -h   Show this help message"
+    Write-Host ""
+    Write-Host "EXAMPLES:" -ForegroundColor Yellow
+    Write-Host "  .\PC-Migration-Tool.ps1 backup -Path D:\Backup"
+    Write-Host "  .\PC-Migration-Tool.ps1 backup -p D:\Backup -y"
+    Write-Host "  .\PC-Migration-Tool.ps1 restore -Path D:\Backup"
+    Write-Host "  .\PC-Migration-Tool.ps1 verify -Path D:\Backup"
+    Write-Host ""
+    Write-Host "INTERACTIVE MODE:" -ForegroundColor Yellow
+    Write-Host "  Run without arguments for menu-driven interface"
+    Write-Host ""
+}
+
+function Start-CLIBackup {
+    param(
+        [string]$BackupPath,
+        [switch]$SkipConfirm
+    )
+
+    if ([string]::IsNullOrWhiteSpace($BackupPath)) {
+        Write-Host "ERROR: -Path is required for CLI backup" -ForegroundColor Red
+        Write-Host "Example: .\PC-Migration-Tool.ps1 backup -Path D:\Backup" -ForegroundColor Yellow
+        exit 1
+    }
+
+    $validation = Test-ValidBackupPath -Path $BackupPath
+    if (-not $validation.Valid) {
+        Write-Host "ERROR: Invalid path - $($validation.Reason)" -ForegroundColor Red
+        exit 1
+    }
+
+    $Global:Config.BackupDrive = $BackupPath
+
+    Write-Host ""
+    Write-Host "PC MIGRATION BACKUP (CLI Mode)" -ForegroundColor Cyan
+    Write-Host "==============================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Backup path: $BackupPath" -ForegroundColor White
+    Write-Host ""
+
+    if (-not $SkipConfirm) {
+        $confirm = Read-Host "Start backup? (Y/N)"
+        if ($confirm -ne 'Y') {
+            Write-Host "Backup cancelled" -ForegroundColor Yellow
+            exit 0
+        }
+    }
+
+    # Run backup (skip the internal confirmation since we already confirmed)
+    $Global:Progress.Operation = "backup"
+    $Global:Progress.StartTime = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    $Global:Progress.CompletedSteps = @()
+
+    $startTime = Get-Date
+
+    if (-not (Initialize-BackupEnvironment)) {
+        exit 1
+    }
+
+    # Initialize checksums hashtable
+    $checksums = @{}
+
+    Write-Host ""
+    Write-Host "--- Package Managers ---" -ForegroundColor Cyan
+    Set-CurrentStep -StepName "Winget" -BackupPath $BackupPath
+    Export-WingetPackages
+    Mark-StepComplete -StepName "Winget" -BackupPath $BackupPath
+
+    Set-CurrentStep -StepName "Chocolatey" -BackupPath $BackupPath
+    Export-ChocolateyPackages
+    Mark-StepComplete -StepName "Chocolatey" -BackupPath $BackupPath
+
+    Set-CurrentStep -StepName "Scoop" -BackupPath $BackupPath
+    Export-ScoopPackages
+    Mark-StepComplete -StepName "Scoop" -BackupPath $BackupPath
+
+    Write-Host ""
+    Write-Host "--- User Data ---" -ForegroundColor Cyan
+    Set-CurrentStep -StepName "UserData" -BackupPath $BackupPath
+    Backup-UserData
+    Mark-StepComplete -StepName "UserData" -BackupPath $BackupPath
+
+    Write-Host ""
+    Write-Host "--- Inventory ---" -ForegroundColor Cyan
+    Set-CurrentStep -StepName "Inventory" -BackupPath $BackupPath
+    Export-Inventory
+    Mark-StepComplete -StepName "Inventory" -BackupPath $BackupPath
+
+    Write-Host ""
+    Write-Host "--- Verification ---" -ForegroundColor Cyan
+    Set-CurrentStep -StepName "Checksums" -BackupPath $BackupPath
+    Write-Host "Generating checksums..." -ForegroundColor Gray
+
+    $pmPath = Join-Path $BackupPath "PackageManagers"
+    if (Test-Path $pmPath) {
+        Get-ChildItem $pmPath -File | ForEach-Object {
+            $relativePath = "PackageManagers\$($_.Name)"
+            $hash = Get-FileChecksum -FilePath $_.FullName
+            if ($hash) { $checksums[$relativePath] = $hash }
+        }
+    }
+
+    $inventoryPath = Join-Path $BackupPath "inventory.json"
+    if (Test-Path $inventoryPath) {
+        $hash = Get-FileChecksum -FilePath $inventoryPath
+        if ($hash) { $checksums["inventory.json"] = $hash }
+    }
+
+    Save-Checksums -BackupPath $BackupPath -Checksums $checksums
+    Mark-StepComplete -StepName "Checksums" -BackupPath $BackupPath
+
+    # Create manifest
+    $manifest = @{
+        Version = $Global:Config.Version
+        BackupDate = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        ComputerName = $env:COMPUTERNAME
+        UserName = $env:USERNAME
+        WindowsVersion = (Get-CimInstance Win32_OperatingSystem).Caption
+        CompletedSteps = $Global:Progress.CompletedSteps
+    }
+    $manifestPath = Join-Path $BackupPath "backup-manifest.json"
+    $manifest | ConvertTo-Json | Out-File -FilePath $manifestPath -Encoding UTF8
+
+    Clear-Progress -BackupPath $BackupPath
+
+    $duration = (Get-Date) - $startTime
+
+    Write-Host ""
+    Write-Host "BACKUP COMPLETE" -ForegroundColor Green
+    Write-Host "Duration: $($duration.Minutes)m $($duration.Seconds)s" -ForegroundColor Gray
+    Write-Host "Location: $BackupPath" -ForegroundColor Gray
+}
+
+function Start-CLIRestore {
+    param(
+        [string]$BackupPath,
+        [switch]$SkipConfirm
+    )
+
+    if ([string]::IsNullOrWhiteSpace($BackupPath)) {
+        Write-Host "ERROR: -Path is required for CLI restore" -ForegroundColor Red
+        Write-Host "Example: .\PC-Migration-Tool.ps1 restore -Path D:\Backup" -ForegroundColor Yellow
+        exit 1
+    }
+
+    if (-not (Test-Path $BackupPath)) {
+        Write-Host "ERROR: Path not found: $BackupPath" -ForegroundColor Red
+        exit 1
+    }
+
+    $manifestPath = Join-Path $BackupPath "backup-manifest.json"
+    if (-not (Test-Path $manifestPath)) {
+        Write-Host "ERROR: No backup found at $BackupPath" -ForegroundColor Red
+        Write-Host "Missing backup-manifest.json" -ForegroundColor Gray
+        exit 1
+    }
+
+    $Global:Config.BackupDrive = $BackupPath
+
+    Write-Host ""
+    Write-Host "PC MIGRATION RESTORE (CLI Mode)" -ForegroundColor Yellow
+    Write-Host "================================" -ForegroundColor Yellow
+    Write-Host ""
+
+    try {
+        $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+        Write-Host "Backup info:" -ForegroundColor White
+        Write-Host "  Computer:  $($manifest.ComputerName)" -ForegroundColor Gray
+        Write-Host "  User:      $($manifest.UserName)" -ForegroundColor Gray
+        Write-Host "  Date:      $($manifest.BackupDate)" -ForegroundColor Gray
+        Write-Host "  Windows:   $($manifest.WindowsVersion)" -ForegroundColor Gray
+        Write-Host ""
+    }
+    catch {
+        Write-Host "WARNING: Could not read backup manifest" -ForegroundColor Yellow
+    }
+
+    if (-not $SkipConfirm) {
+        $confirm = Read-Host "Start restore? (Y/N)"
+        if ($confirm -ne 'Y') {
+            Write-Host "Restore cancelled" -ForegroundColor Yellow
+            exit 0
+        }
+    }
+
+    # Run restore
+    Start-Restore -BackupPath $BackupPath
+}
+
+function Start-CLIVerify {
+    param([string]$BackupPath)
+
+    if ([string]::IsNullOrWhiteSpace($BackupPath)) {
+        Write-Host "ERROR: -Path is required" -ForegroundColor Red
+        exit 1
+    }
+
+    if (-not (Test-Path $BackupPath)) {
+        Write-Host "ERROR: Path not found: $BackupPath" -ForegroundColor Red
+        exit 1
+    }
+
+    Write-Host ""
+    Write-Host "VERIFYING BACKUP INTEGRITY" -ForegroundColor Magenta
+    Write-Host "==========================" -ForegroundColor Magenta
+    Write-Host ""
+    Write-Host "Path: $BackupPath" -ForegroundColor Gray
+    Write-Host ""
+
+    $result = Test-BackupIntegrity -BackupPath $BackupPath
+
+    if ($result.FilesChecked -eq 0) {
+        Write-Host "No checksums found - backup may be from older version" -ForegroundColor Yellow
+        exit 0
+    }
+
+    if ($result.Verified) {
+        Write-Host "VERIFIED: $($result.FilesChecked) files OK" -ForegroundColor Green
+        exit 0
+    }
+    else {
+        Write-Host "ERRORS FOUND:" -ForegroundColor Red
+        foreach ($err in $result.Errors) {
+            Write-Host "  - $err" -ForegroundColor Red
+        }
+        exit 1
+    }
+}
+
+function Start-CLIInventory {
+    param([string]$BackupPath)
+
+    if ([string]::IsNullOrWhiteSpace($BackupPath)) {
+        Write-Host "ERROR: -Path is required" -ForegroundColor Red
+        exit 1
+    }
+
+    $inventoryPath = Join-Path $BackupPath "inventory.json"
+
+    if (-not (Test-Path $inventoryPath)) {
+        Write-Host "ERROR: No inventory found at $BackupPath" -ForegroundColor Red
+        exit 1
+    }
+
+    $inventory = Get-Content $inventoryPath -Raw | ConvertFrom-Json
+
+    Write-Host ""
+    Write-Host "BACKUP INVENTORY" -ForegroundColor Cyan
+    Write-Host "================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Backup Date:  $($inventory.ExportDate)" -ForegroundColor Gray
+    Write-Host "Computer:     $($inventory.ComputerName)" -ForegroundColor Gray
+    Write-Host "User:         $($inventory.UserName)" -ForegroundColor Gray
+    Write-Host "Windows:      $($inventory.WindowsVersion)" -ForegroundColor Gray
+    Write-Host "Total Apps:   $($inventory.TotalApps)" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "Applications:" -ForegroundColor Yellow
+    Write-Host ""
+
+    $inventory.Applications | Sort-Object Name | ForEach-Object {
+        Write-Host "  $($_.Name)" -ForegroundColor White -NoNewline
+        if ($_.Version) {
+            Write-Host " v$($_.Version)" -ForegroundColor DarkGray
+        }
+        else {
+            Write-Host ""
+        }
+    }
+}
+
+# ============================================================================
+# ENTRY POINT
+# ============================================================================
+
 # Verify admin
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "This script requires Administrator privileges!" -ForegroundColor Red
@@ -1834,5 +2155,35 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     exit 1
 }
 
-# Start the main menu
-Show-MainMenu
+# Check for CLI mode
+if ($Help) {
+    Show-Help
+    exit 0
+}
+
+if (-not [string]::IsNullOrWhiteSpace($Command)) {
+    # CLI mode
+    switch ($Command.ToLower()) {
+        "backup" {
+            Start-CLIBackup -BackupPath $Path -SkipConfirm:$Yes
+        }
+        "restore" {
+            Start-CLIRestore -BackupPath $Path -SkipConfirm:$Yes
+        }
+        "verify" {
+            Start-CLIVerify -BackupPath $Path
+        }
+        "inventory" {
+            Start-CLIInventory -BackupPath $Path
+        }
+        default {
+            Write-Host "Unknown command: $Command" -ForegroundColor Red
+            Show-Help
+            exit 1
+        }
+    }
+}
+else {
+    # Interactive mode (for exe / non-technical users)
+    Show-MainMenu
+}
