@@ -58,22 +58,14 @@ param(
 $Global:Config = @{
     BackupDrive         = "D:\PCMigration"
     LogFile             = "migration.log"
-    Version             = "3.3"
+    Version             = "3.6"
 
-    # User data folders to backup (relative to user profile)
-    UserDataFolders     = @(
-        "Documents",
-        "Desktop",
-        "Downloads",
-        "Pictures",
-        "Videos",
-        "Music",
-        ".gitconfig"
-    )
+    # Backup entire user profile (set to $true to scan all folders)
+    BackupFullProfile   = $true
 
     # Sensitive folders - user will be prompted before backing these up
+    # (Empty - .ssh now included by default since it may contain important keys)
     SensitiveFolders    = @(
-        ".ssh"          # Contains private keys - security risk if backup is compromised
     )
 
     # AppData folders to backup (common apps that store important data)
@@ -88,14 +80,8 @@ $Global:Config = @{
     # Maximum file size to backup (skip huge files)
     MaxFileSize         = 1GB
 
-    # Exclude patterns
-    ExcludePatterns     = @(
-        "node_modules",
-        ".git\objects",
-        "__pycache__",
-        "*.tmp",
-        "*.log",
-        "Thumbs.db",
+    # Folders to exclude (cloud sync, system junctions, temp data)
+    ExcludeFolders      = @(
         # Cloud sync folders (already backed up to servers)
         "Dropbox",
         "OneDrive",
@@ -104,13 +90,103 @@ $Global:Config = @{
         "iCloudDrive",
         "iCloud Drive",
         "Box",
-        "Box Sync"
+        "Box Sync",
+        "Creative Cloud Files",
+        # System junction folders (not real folders, just links)
+        "Application Data",
+        "Local Settings",
+        "My Documents",
+        "NetHood",
+        "PrintHood",
+        "Recent",
+        "SendTo",
+        "Start Menu",
+        "Templates",
+        "Cookies",
+        # AppData handled separately
+        "AppData",
+        # Temp/cache folders
+        "Tracing",
+        ".cache",
+        ".local",
+        # Package manager caches (can be huge)
+        "scoop",
+        ".minikube",
+        ".android"
+    )
+
+    # File patterns to exclude
+    ExcludePatterns     = @(
+        "node_modules",
+        ".git\objects",
+        "__pycache__",
+        "*.tmp",
+        "*.log",
+        "Thumbs.db",
+        "desktop.ini"
     )
 }
 
 # Get the folder where this exe/script is located (set at startup)
 $Global:ExeFolder = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent ([Environment]::GetCommandLineArgs()[0]) }
 if (-not $Global:ExeFolder -or $Global:ExeFolder -eq "") { $Global:ExeFolder = (Get-Location).Path }
+
+# ============================================================================
+# FOLDER PATH RESOLUTION (handles OneDrive redirection)
+# ============================================================================
+
+# Map logical folder names to Windows Shell special folder enum values
+$Global:ShellFolderMap = @{
+    "Documents"  = "MyDocuments"
+    "Desktop"    = "Desktop"
+    "Downloads"  = $null  # No Shell constant, handled separately
+    "Pictures"   = "MyPictures"
+    "Videos"     = "MyVideos"
+    "Music"      = "MyMusic"
+}
+
+function Get-ActualFolderPath {
+    param([string]$FolderName)
+
+    # For files like .gitconfig, just use user profile
+    if ($FolderName -match '^\.' -or $FolderName -match '\.\w+$') {
+        return Join-Path $env:USERPROFILE $FolderName
+    }
+
+    # Try Shell API first (handles OneDrive redirection)
+    if ($Global:ShellFolderMap.ContainsKey($FolderName)) {
+        $shellName = $Global:ShellFolderMap[$FolderName]
+        if ($shellName) {
+            $shellPath = [Environment]::GetFolderPath($shellName)
+            if ($shellPath -and (Test-Path $shellPath)) {
+                return $shellPath
+            }
+        }
+    }
+
+    # Special handling for Downloads (no Shell constant)
+    if ($FolderName -eq "Downloads") {
+        # Try Known Folder API via registry
+        $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
+        $downloads = (Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue)."{374DE290-123F-4565-9164-39C4925E467B}"
+        if ($downloads -and (Test-Path $downloads)) {
+            return $downloads
+        }
+        # Fallback to profile path
+        $fallback = Join-Path $env:USERPROFILE "Downloads"
+        if (Test-Path $fallback) {
+            return $fallback
+        }
+    }
+
+    # Fallback: try user profile path
+    $profilePath = Join-Path $env:USERPROFILE $FolderName
+    if (Test-Path $profilePath) {
+        return $profilePath
+    }
+
+    return $null
+}
 
 # Progress tracking for resume capability
 $Global:Progress = @{
@@ -777,38 +853,82 @@ function Import-ScoopPackages {
 # USER DATA BACKUP (What Actually Matters)
 # ============================================================================
 
-function Backup-UserData {
-    Write-Log "Backing up user data..." -Level INFO
+function Backup-SingleUserProfile {
+    param(
+        [string]$UserProfilePath,
+        [string]$Username,
+        [string]$BackupBase
+    )
 
-    $userProfile = $env:USERPROFILE
-    $backupBase = Join-Path $Global:Config.BackupDrive "UserData"
+    $usersBackupBase = Join-Path $BackupBase "Users\$Username"
+    if (-not (Test-Path $usersBackupBase)) {
+        New-Item -ItemType Directory -Path $usersBackupBase -Force | Out-Null
+    }
 
-    # Build list of folders to backup, prompting for sensitive ones
-    $foldersToBackup = @() + $Global:Config.UserDataFolders
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "Backing up user: $Username" -ForegroundColor Cyan
+    Write-Host "Profile: $UserProfilePath" -ForegroundColor Gray
+    Write-Host "========================================" -ForegroundColor Cyan
 
-    foreach ($sensitiveFolder in $Global:Config.SensitiveFolders) {
-        $sensitivePath = Join-Path $userProfile $sensitiveFolder
-        if (Test-Path $sensitivePath) {
+    $allItems = Get-ChildItem $UserProfilePath -Force -ErrorAction SilentlyContinue
+    $foldersToBackup = @()
+    $filesToBackup = @()
+
+    foreach ($item in $allItems) {
+        $itemName = $item.Name
+
+        # Check if this is an excluded folder
+        $isExcluded = $false
+        foreach ($excludePattern in $Global:Config.ExcludeFolders) {
+            if ($itemName -like $excludePattern) {
+                $isExcluded = $true
+                break
+            }
+        }
+
+        if ($isExcluded) {
+            Write-Log "[$Username] Skipping (excluded): $itemName" -Level INFO
+            continue
+        }
+
+        # Check if it's a system junction/reparse point
+        if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            Write-Log "[$Username] Skipping (junction): $itemName" -Level INFO
+            continue
+        }
+
+        # Check for sensitive folders
+        if ($Global:Config.SensitiveFolders -contains $itemName) {
             Write-Host ""
-            Write-Host "SECURITY WARNING: $sensitiveFolder contains sensitive data (private keys, credentials)" -ForegroundColor Red
+            Write-Host "SECURITY WARNING: $Username\$itemName contains sensitive data (private keys, credentials)" -ForegroundColor Red
             Write-Host "If your backup drive is lost or stolen, this data could be compromised." -ForegroundColor Yellow
-            $includeSensitive = Read-Host "Include $sensitiveFolder in backup? (Y/N)"
-            if ($includeSensitive -eq 'Y') {
-                $foldersToBackup += $sensitiveFolder
-                Write-Log "User opted to include sensitive folder: $sensitiveFolder" -Level WARNING
+            $includeSensitive = Read-Host "Include $itemName in backup? (Y/N)"
+            if ($includeSensitive -ne 'Y') {
+                Write-Log "User opted to skip sensitive folder: $itemName" -Level INFO
+                continue
             }
-            else {
-                Write-Log "User opted to skip sensitive folder: $sensitiveFolder" -Level INFO
-            }
+            Write-Log "User opted to include sensitive folder: $itemName" -Level WARNING
+        }
+
+        if ($item.PSIsContainer) {
+            $foldersToBackup += $item
+        } else {
+            $filesToBackup += $item
         }
     }
 
-    # Build list of AppData folders that exist
+    Write-Host "Found $($foldersToBackup.Count) folders and $($filesToBackup.Count) files to backup" -ForegroundColor Gray
+
+    # Build list of AppData folders that exist for this user
     $appDataFoldersToBackup = @()
+    $userAppDataRoaming = Join-Path $UserProfilePath "AppData\Roaming"
+    $userAppDataLocal = Join-Path $UserProfilePath "AppData\Local"
+
     foreach ($folder in $Global:Config.AppDataFolders) {
-        $sourcePath = Join-Path $env:APPDATA $folder
+        $sourcePath = Join-Path $userAppDataRoaming $folder
         if (-not (Test-Path $sourcePath)) {
-            $sourcePath = Join-Path $env:LOCALAPPDATA $folder
+            $sourcePath = Join-Path $userAppDataLocal $folder
         }
         if (Test-Path $sourcePath) {
             $appDataFoldersToBackup += @{ Folder = $folder; Path = $sourcePath }
@@ -816,7 +936,6 @@ function Backup-UserData {
     }
 
     # Calculate total size for progress estimation
-    Write-Host ""
     Write-Host "Calculating backup size..." -ForegroundColor Cyan
 
     $folderSizes = @{}
@@ -824,19 +943,23 @@ function Backup-UserData {
     $excludeDirs = $Global:Config.ExcludePatterns | Where-Object { $_ -notmatch '\.' }
 
     foreach ($folder in $foldersToBackup) {
-        $sourcePath = Join-Path $userProfile $folder
-        if (Test-Path $sourcePath) {
-            try {
-                $size = (Get-ChildItem $sourcePath -Recurse -File -ErrorAction SilentlyContinue |
-                         Where-Object { $_.Length -lt $Global:Config.MaxFileSize } |
-                         Measure-Object -Property Length -Sum).Sum
-                if ($null -eq $size) { $size = 0 }
-                $folderSizes[$folder] = $size
-                $totalEstimatedSize += $size
-            }
-            catch {
-                $folderSizes[$folder] = 0
-            }
+        try {
+            $size = (Get-ChildItem $folder.FullName -Recurse -File -ErrorAction SilentlyContinue |
+                     Where-Object { $_.Length -lt $Global:Config.MaxFileSize } |
+                     Measure-Object -Property Length -Sum).Sum
+            if ($null -eq $size) { $size = 0 }
+            $folderSizes[$folder.Name] = $size
+            $totalEstimatedSize += $size
+        }
+        catch {
+            $folderSizes[$folder.Name] = 0
+        }
+    }
+
+    foreach ($file in $filesToBackup) {
+        if ($file.Length -lt $Global:Config.MaxFileSize) {
+            $folderSizes[$file.Name] = $file.Length
+            $totalEstimatedSize += $file.Length
         }
     }
 
@@ -861,24 +984,39 @@ function Backup-UserData {
     $totalFiles = 0
     $totalSize = 0
 
-    # Backup user folders with progress
-    foreach ($folder in $foldersToBackup) {
-        $sourcePath = Join-Path $userProfile $folder
-
-        if (-not (Test-Path $sourcePath)) {
-            Write-Log "Skipping (not found): $folder" -Level INFO
+    # Backup root files first (like .gitconfig)
+    foreach ($file in $filesToBackup) {
+        if ($file.Length -ge $Global:Config.MaxFileSize) {
+            Write-Log "Skipping (too large): $($file.Name)" -Level INFO
             continue
         }
 
-        $destPath = Join-Path $backupBase $folder
+        try {
+            Copy-Item -Path $file.FullName -Destination $usersBackupBase -Force
+            $totalFiles += 1
+            $totalSize += $file.Length
+            Write-Log "Copied file: $($file.Name)" -Level SUCCESS
+        }
+        catch {
+            Write-Log "Error copying file $($file.Name): $_" -Level ERROR
+        }
+        $completedSize += $file.Length
+    }
+
+    # Backup user folders with progress
+    foreach ($folder in $foldersToBackup) {
+        $sourcePath = $folder.FullName
+        $folderName = $folder.Name
 
         # Calculate and display progress
         $percentComplete = if ($totalEstimatedSize -gt 0) {
             [math]::Round(($completedSize / $totalEstimatedSize) * 100, 1)
         } else { 0 }
 
-        Write-Progress -Activity "Backing up user data" -Status "$folder ($percentComplete% complete)" -PercentComplete $percentComplete
-        Write-Log "Backing up: $folder" -Level INFO
+        Write-Progress -Activity "Backing up user data" -Status "$folderName ($percentComplete% complete)" -PercentComplete $percentComplete
+        Write-Log "Backing up: $folderName" -Level INFO
+
+        $destPath = Join-Path $usersBackupBase $folderName
 
         try {
             # Use robocopy for reliable copying with exclusions
@@ -915,22 +1053,22 @@ function Backup-UserData {
                          Measure-Object -Property Length -Sum
                 $totalFiles += $stats.Count
                 $totalSize += $stats.Sum
-                Write-Log "Copied $folder ($($stats.Count) files)" -Level SUCCESS
+                Write-Log "Copied $folderName ($($stats.Count) files)" -Level SUCCESS
             }
             else {
-                Write-Log "Robocopy returned code $LASTEXITCODE for $folder" -Level WARNING
+                Write-Log "Robocopy returned code $LASTEXITCODE for $folderName" -Level WARNING
             }
         }
         catch {
-            Write-Log "Error backing up $folder : $_" -Level ERROR
+            Write-Log "Error backing up $folderName : $_" -Level ERROR
         }
 
         # Update completed size for progress
-        $completedSize += $folderSizes[$folder]
+        $completedSize += $folderSizes[$folderName]
     }
 
     # Backup AppData folders with progress
-    $appDataBase = Join-Path $backupBase "AppData"
+    $appDataBase = Join-Path $usersBackupBase "AppData"
     foreach ($item in $appDataFoldersToBackup) {
         $destPath = Join-Path $appDataBase $item.Folder
 
@@ -960,7 +1098,47 @@ function Backup-UserData {
     Write-Progress -Activity "Backing up user data" -Completed
 
     $sizeMB = [math]::Round($totalSize / 1MB, 2)
-    Write-Log "User data backup complete: $totalFiles files, $sizeMB MB" -Level SUCCESS
+    Write-Log "[$Username] Backup complete: $totalFiles files, $sizeMB MB" -Level SUCCESS
+
+    return @{
+        Files = $totalFiles
+        SizeMB = $sizeMB
+    }
+}
+
+function Backup-UserData {
+    Write-Log "Backing up user data..." -Level INFO
+
+    $backupBase = Join-Path $Global:Config.BackupDrive "UserData"
+
+    # Get all user profiles (excluding system accounts)
+    $excludeUsers = @("Public", "Default", "Default User", "All Users")
+    $userProfiles = Get-ChildItem "C:\Users" -Directory -ErrorAction SilentlyContinue |
+                    Where-Object { $excludeUsers -notcontains $_.Name }
+
+    Write-Host ""
+    Write-Host "Found $($userProfiles.Count) user profile(s) to backup:" -ForegroundColor Cyan
+    foreach ($profile in $userProfiles) {
+        Write-Host "  - $($profile.Name)" -ForegroundColor Gray
+    }
+
+    $grandTotalFiles = 0
+    $grandTotalSizeMB = 0
+
+    foreach ($profile in $userProfiles) {
+        $result = Backup-SingleUserProfile -UserProfilePath $profile.FullName -Username $profile.Name -BackupBase $backupBase
+        if ($result) {
+            $grandTotalFiles += $result.Files
+            $grandTotalSizeMB += $result.SizeMB
+        }
+    }
+
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Green
+    Write-Host "ALL USERS BACKUP COMPLETE" -ForegroundColor Green
+    Write-Host "Total: $grandTotalFiles files, $grandTotalSizeMB MB" -ForegroundColor Green
+    Write-Host "========================================" -ForegroundColor Green
+    Write-Log "All users backup complete: $grandTotalFiles files, $grandTotalSizeMB MB" -Level SUCCESS
 }
 
 function Restore-UserData {
@@ -971,6 +1149,25 @@ function Restore-UserData {
     if (-not (Test-Path $backupBase)) {
         Write-Log "User data backup not found" -Level WARNING
         return
+    }
+
+    # Check for new structure (Users\username) or old structure
+    $usersFolder = Join-Path $backupBase "Users"
+    $backupUsername = $null
+
+    if (Test-Path $usersFolder) {
+        # New structure - find the backed up username
+        $userFolders = Get-ChildItem $usersFolder -Directory
+        if ($userFolders.Count -gt 0) {
+            $backupUsername = $userFolders[0].Name
+            $sourceBase = Join-Path $usersFolder $backupUsername
+            Write-Host "Found backup for user: $backupUsername" -ForegroundColor Cyan
+        }
+    }
+
+    if (-not $backupUsername) {
+        # Old structure - direct folders
+        $sourceBase = $backupBase
     }
 
     Write-Log "Restoring user data..." -Level INFO
@@ -986,30 +1183,44 @@ function Restore-UserData {
 
     $userProfile = $env:USERPROFILE
 
-    foreach ($folder in $Global:Config.UserDataFolders) {
-        $sourcePath = Join-Path $backupBase $folder
+    # Get all items from backup source
+    $allItems = Get-ChildItem $sourceBase -Force -ErrorAction SilentlyContinue
 
-        if (-not (Test-Path $sourcePath)) {
-            continue
-        }
+    foreach ($item in $allItems) {
+        $itemName = $item.Name
 
-        $destPath = Join-Path $userProfile $folder
-        Write-Log "Restoring: $folder" -Level INFO
+        # Skip AppData - handled separately
+        if ($itemName -eq "AppData") { continue }
 
-        try {
-            robocopy $sourcePath $destPath /E /R:1 /W:1 /MT:8 /NFL /NDL /NJH /NJS 2>&1 | Out-Null
+        Write-Log "Restoring: $itemName" -Level INFO
 
-            if ($LASTEXITCODE -le 7) {
-                Write-Log "Restored: $folder" -Level SUCCESS
+        if ($item.PSIsContainer) {
+            # Directory
+            $destPath = Join-Path $userProfile $itemName
+            try {
+                robocopy $item.FullName $destPath /E /R:1 /W:1 /MT:8 /NFL /NDL /NJH /NJS 2>&1 | Out-Null
+                if ($LASTEXITCODE -le 7) {
+                    Write-Log "Restored: $itemName" -Level SUCCESS
+                }
+            }
+            catch {
+                Write-Log "Error restoring $itemName : $_" -Level ERROR
             }
         }
-        catch {
-            Write-Log "Error restoring $folder : $_" -Level ERROR
+        else {
+            # File
+            try {
+                Copy-Item -Path $item.FullName -Destination $userProfile -Force
+                Write-Log "Restored file: $itemName" -Level SUCCESS
+            }
+            catch {
+                Write-Log "Error restoring file $itemName : $_" -Level ERROR
+            }
         }
     }
 
     # Restore AppData
-    $appDataBackup = Join-Path $backupBase "AppData"
+    $appDataBackup = Join-Path $sourceBase "AppData"
     if (Test-Path $appDataBackup) {
         foreach ($folder in $Global:Config.AppDataFolders) {
             $sourcePath = Join-Path $appDataBackup $folder
