@@ -20,6 +20,8 @@ PC Migration Toolkit v3.6 - A PowerShell script for simple PC migration:
 | `PC-Migration-Tool.exe` | Compiled exe for non-technical users |
 | `Setup-Users.ps1` | Helper to create user accounts on new PC |
 | `build.ps1` | Build script for PS2EXE compilation |
+| `README.md` | User documentation and quick start guide |
+| `CHANGELOG.md` | Version history and release notes |
 
 ## Running the Tool
 
