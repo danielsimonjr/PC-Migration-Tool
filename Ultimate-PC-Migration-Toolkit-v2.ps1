@@ -1,5 +1,5 @@
 # ============================================================================
-# PC MIGRATION TOOLKIT v3.0
+# PC MIGRATION TOOLKIT v3.1
 # Honest PC Migration: Package Managers + User Data
 #
 # Created for: Daniel Simon Jr. - Systems Engineer
@@ -32,7 +32,7 @@
 $Global:Config = @{
     BackupDrive         = "D:\PCMigration"
     LogFile             = "migration.log"
-    Version             = "3.0"
+    Version             = "3.1"
 
     # User data folders to backup (relative to user profile)
     UserDataFolders     = @(
@@ -42,8 +42,12 @@ $Global:Config = @{
         "Pictures",
         "Videos",
         "Music",
-        ".ssh",
         ".gitconfig"
+    )
+
+    # Sensitive folders - user will be prompted before backing these up
+    SensitiveFolders    = @(
+        ".ssh"          # Contains private keys - security risk if backup is compromised
     )
 
     # AppData folders to backup (common apps that store important data)
@@ -105,8 +109,59 @@ function Write-Log {
     }
 }
 
+function Test-ValidBackupPath {
+    param([string]$Path)
+
+    # Check for empty/null
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return @{ Valid = $false; Reason = "Path cannot be empty" }
+    }
+
+    # Check for relative paths
+    if (-not [System.IO.Path]::IsPathRooted($Path)) {
+        return @{ Valid = $false; Reason = "Path must be absolute, not relative" }
+    }
+
+    # Normalize path for comparison
+    try {
+        $normalizedPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    }
+    catch {
+        return @{ Valid = $false; Reason = "Invalid path format" }
+    }
+
+    # Block system directories
+    $blockedPaths = @(
+        "$env:SystemRoot",                    # C:\Windows
+        "$env:ProgramFiles",                  # C:\Program Files
+        "${env:ProgramFiles(x86)}",           # C:\Program Files (x86)
+        "$env:SystemDrive\Users\Default",     # Default user profile
+        "$env:SystemDrive\Users\Public"       # Public profile
+    )
+
+    foreach ($blocked in $blockedPaths) {
+        if ($blocked -and $normalizedPath -like "$blocked*") {
+            return @{ Valid = $false; Reason = "Cannot backup to system directory: $blocked" }
+        }
+    }
+
+    # Block current user profile root (but allow subdirectories)
+    if ($normalizedPath -eq $env:USERPROFILE) {
+        return @{ Valid = $false; Reason = "Cannot backup to user profile root" }
+    }
+
+    return @{ Valid = $true; Reason = "" }
+}
+
 function Initialize-BackupEnvironment {
     Write-Log "Initializing backup environment..." -Level INFO
+
+    # Validate backup path
+    $validation = Test-ValidBackupPath -Path $Global:Config.BackupDrive
+    if (-not $validation.Valid) {
+        Write-Log "Invalid backup path: $($validation.Reason)" -Level ERROR
+        return $false
+    }
 
     if (-not (Test-Path $Global:Config.BackupDrive)) {
         try {
@@ -337,7 +392,27 @@ function Backup-UserData {
     $totalSize = 0
     $totalFiles = 0
 
-    foreach ($folder in $Global:Config.UserDataFolders) {
+    # Build list of folders to backup, prompting for sensitive ones
+    $foldersToBackup = @() + $Global:Config.UserDataFolders
+
+    foreach ($sensitiveFolder in $Global:Config.SensitiveFolders) {
+        $sensitivePath = Join-Path $userProfile $sensitiveFolder
+        if (Test-Path $sensitivePath) {
+            Write-Host ""
+            Write-Host "SECURITY WARNING: $sensitiveFolder contains sensitive data (private keys, credentials)" -ForegroundColor Red
+            Write-Host "If your backup drive is lost or stolen, this data could be compromised." -ForegroundColor Yellow
+            $includeSensitive = Read-Host "Include $sensitiveFolder in backup? (Y/N)"
+            if ($includeSensitive -eq 'Y') {
+                $foldersToBackup += $sensitiveFolder
+                Write-Log "User opted to include sensitive folder: $sensitiveFolder" -Level WARNING
+            }
+            else {
+                Write-Log "User opted to skip sensitive folder: $sensitiveFolder" -Level INFO
+            }
+        }
+    }
+
+    foreach ($folder in $foldersToBackup) {
         $sourcePath = Join-Path $userProfile $folder
 
         if (-not (Test-Path $sourcePath)) {
@@ -551,6 +626,10 @@ function Export-Inventory {
 
     $applications = Get-InstalledApplications
 
+    Write-Host ""
+    Write-Host "NOTE: Inventory will include computer name and username for reference." -ForegroundColor Yellow
+    Write-Host "This information will be stored in plaintext in inventory.json" -ForegroundColor Yellow
+
     $inventory = @{
         ExportDate      = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
         ComputerName    = $env:COMPUTERNAME
@@ -561,6 +640,7 @@ function Export-Inventory {
         Applications    = $applications
         TotalApps       = $applications.Count
         Note            = "This inventory is for REFERENCE ONLY. Use package manager imports to reinstall apps."
+        SecurityNote    = "This file contains system information. Do not share publicly."
     }
 
     $inventoryPath = Join-Path $Global:Config.BackupDrive "inventory.json"
@@ -601,12 +681,20 @@ function Start-Backup {
         return
     }
 
-    # Check disk space
+    # Check disk space (handle both local and UNC paths)
     try {
-        $driveLetter = $Global:Config.BackupDrive.Substring(0, 1)
-        $drive = Get-PSDrive -Name $driveLetter -ErrorAction SilentlyContinue
-        if ($drive -and $drive.Free -lt 5GB) {
-            Write-Log "Warning: Less than 5GB free on backup drive" -Level WARNING
+        $backupPath = $Global:Config.BackupDrive
+        if ($backupPath -match '^\\\\') {
+            # UNC path - use Get-WmiObject for network shares
+            $freeSpace = $null
+            Write-Log "UNC path detected - skipping disk space check" -Level INFO
+        }
+        elseif ($backupPath -match '^([A-Za-z]):') {
+            $driveLetter = $matches[1]
+            $drive = Get-PSDrive -Name $driveLetter -ErrorAction SilentlyContinue
+            if ($drive -and $drive.Free -lt 5GB) {
+                Write-Log "Warning: Less than 5GB free on backup drive" -Level WARNING
+            }
         }
     }
     catch { }
@@ -807,10 +895,16 @@ function Start-InteractiveMode {
                 Read-Host "`nPress Enter to continue"
             }
             "4" {
-                $newPath = Read-Host "Enter new backup path"
+                $newPath = Read-Host "Enter new backup path (absolute path required)"
                 if (-not [string]::IsNullOrWhiteSpace($newPath)) {
-                    $Global:Config.BackupDrive = $newPath
-                    Write-Host "Backup path updated to: $newPath" -ForegroundColor Green
+                    $validation = Test-ValidBackupPath -Path $newPath
+                    if ($validation.Valid) {
+                        $Global:Config.BackupDrive = $newPath
+                        Write-Host "Backup path updated to: $newPath" -ForegroundColor Green
+                    }
+                    else {
+                        Write-Host "Invalid path: $($validation.Reason)" -ForegroundColor Red
+                    }
                 }
                 Read-Host "`nPress Enter to continue"
             }

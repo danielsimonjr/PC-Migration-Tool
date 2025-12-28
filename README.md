@@ -1,4 +1,4 @@
-# PC Migration Toolkit v3.0
+# PC Migration Toolkit v3.1
 
 ## What This Tool Actually Does
 
@@ -101,3 +101,9 @@ Previous versions tried to "migrate" apps by copying files and registry keys. Th
 - Gives users false confidence their apps are backed up
 
 v3.0 does what actually works: reinstall via package managers + backup user data.
+
+## Security (v3.1)
+
+- **Sensitive folders** (`.ssh`) require explicit confirmation before backup
+- **Path validation** blocks system directories and relative paths
+- **Inventory warnings** remind you the file contains system info
