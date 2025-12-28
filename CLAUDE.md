@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-PC Migration Toolkit v3.1 - A PowerShell script that does PC migration the right way:
+PC Migration Toolkit v3.2 - A PowerShell script that does PC migration the right way:
 - Exports Winget/Chocolatey/Scoop package lists for proper reinstallation
 - Backs up user data (Documents, Desktop, Downloads, etc.)
 - Creates an inventory of installed apps (reference only)
@@ -22,7 +22,7 @@ Interactive menu with 5 options: Backup, Restore, View Inventory, Configure Path
 
 ## Architecture
 
-Single PowerShell file (~920 lines) organized into sections:
+Single PowerShell file (~1020 lines) organized into sections:
 
 ### Configuration (Lines 32-75)
 - `BackupDrive` - Target path
@@ -78,3 +78,9 @@ BackupDrive/
 - `SensitiveFolders` - Prompts user with red warning before backing up `.ssh` (private keys)
 - UNC path handling - Properly detects `\\server\share` paths
 - Inventory includes `SecurityNote` warning not to share publicly
+
+## UX Features (v3.2)
+
+- `Initialize-BackupDrivePrompt` - Prompts user for backup location on startup
+- Progress bar with percentage during user data backup (`Write-Progress`)
+- Size estimation before backup starts

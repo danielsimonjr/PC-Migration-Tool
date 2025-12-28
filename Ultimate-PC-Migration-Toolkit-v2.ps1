@@ -1,5 +1,5 @@
 # ============================================================================
-# PC MIGRATION TOOLKIT v3.1
+# PC MIGRATION TOOLKIT v3.2
 # Honest PC Migration: Package Managers + User Data
 #
 # Created for: Daniel Simon Jr. - Systems Engineer
@@ -32,7 +32,7 @@
 $Global:Config = @{
     BackupDrive         = "D:\PCMigration"
     LogFile             = "migration.log"
-    Version             = "3.1"
+    Version             = "3.2"
 
     # User data folders to backup (relative to user profile)
     UserDataFolders     = @(
@@ -389,9 +389,6 @@ function Backup-UserData {
     $userProfile = $env:USERPROFILE
     $backupBase = Join-Path $Global:Config.BackupDrive "UserData"
 
-    $totalSize = 0
-    $totalFiles = 0
-
     # Build list of folders to backup, prompting for sensitive ones
     $foldersToBackup = @() + $Global:Config.UserDataFolders
 
@@ -412,6 +409,65 @@ function Backup-UserData {
         }
     }
 
+    # Build list of AppData folders that exist
+    $appDataFoldersToBackup = @()
+    foreach ($folder in $Global:Config.AppDataFolders) {
+        $sourcePath = Join-Path $env:APPDATA $folder
+        if (-not (Test-Path $sourcePath)) {
+            $sourcePath = Join-Path $env:LOCALAPPDATA $folder
+        }
+        if (Test-Path $sourcePath) {
+            $appDataFoldersToBackup += @{ Folder = $folder; Path = $sourcePath }
+        }
+    }
+
+    # Calculate total size for progress estimation
+    Write-Host ""
+    Write-Host "Calculating backup size..." -ForegroundColor Cyan
+
+    $folderSizes = @{}
+    $totalEstimatedSize = 0
+    $excludeDirs = $Global:Config.ExcludePatterns | Where-Object { $_ -notmatch '\.' }
+
+    foreach ($folder in $foldersToBackup) {
+        $sourcePath = Join-Path $userProfile $folder
+        if (Test-Path $sourcePath) {
+            try {
+                $size = (Get-ChildItem $sourcePath -Recurse -File -ErrorAction SilentlyContinue |
+                         Where-Object { $_.Length -lt $Global:Config.MaxFileSize } |
+                         Measure-Object -Property Length -Sum).Sum
+                if ($null -eq $size) { $size = 0 }
+                $folderSizes[$folder] = $size
+                $totalEstimatedSize += $size
+            }
+            catch {
+                $folderSizes[$folder] = 0
+            }
+        }
+    }
+
+    foreach ($item in $appDataFoldersToBackup) {
+        try {
+            $size = (Get-ChildItem $item.Path -Recurse -File -ErrorAction SilentlyContinue |
+                     Measure-Object -Property Length -Sum).Sum
+            if ($null -eq $size) { $size = 0 }
+            $folderSizes["AppData:$($item.Folder)"] = $size
+            $totalEstimatedSize += $size
+        }
+        catch {
+            $folderSizes["AppData:$($item.Folder)"] = 0
+        }
+    }
+
+    $totalEstimatedMB = [math]::Round($totalEstimatedSize / 1MB, 2)
+    Write-Host "Estimated total: $totalEstimatedMB MB" -ForegroundColor Gray
+    Write-Host ""
+
+    $completedSize = 0
+    $totalFiles = 0
+    $totalSize = 0
+
+    # Backup user folders with progress
     foreach ($folder in $foldersToBackup) {
         $sourcePath = Join-Path $userProfile $folder
 
@@ -421,11 +477,17 @@ function Backup-UserData {
         }
 
         $destPath = Join-Path $backupBase $folder
+
+        # Calculate and display progress
+        $percentComplete = if ($totalEstimatedSize -gt 0) {
+            [math]::Round(($completedSize / $totalEstimatedSize) * 100, 1)
+        } else { 0 }
+
+        Write-Progress -Activity "Backing up user data" -Status "$folder ($percentComplete% complete)" -PercentComplete $percentComplete
         Write-Log "Backing up: $folder" -Level INFO
 
         try {
             # Use robocopy for reliable copying with exclusions
-            $excludeDirs = $Global:Config.ExcludePatterns | Where-Object { $_ -notmatch '\.' }
             $excludeFiles = $Global:Config.ExcludePatterns | Where-Object { $_ -match '\.' }
 
             $robocopyArgs = @(
@@ -468,35 +530,40 @@ function Backup-UserData {
         catch {
             Write-Log "Error backing up $folder : $_" -Level ERROR
         }
+
+        # Update completed size for progress
+        $completedSize += $folderSizes[$folder]
     }
 
-    # Backup AppData folders
+    # Backup AppData folders with progress
     $appDataBase = Join-Path $backupBase "AppData"
-    foreach ($folder in $Global:Config.AppDataFolders) {
-        $sourcePath = Join-Path $env:APPDATA $folder
+    foreach ($item in $appDataFoldersToBackup) {
+        $destPath = Join-Path $appDataBase $item.Folder
 
-        if (-not (Test-Path $sourcePath)) {
-            $sourcePath = Join-Path $env:LOCALAPPDATA $folder
-        }
+        # Calculate and display progress
+        $percentComplete = if ($totalEstimatedSize -gt 0) {
+            [math]::Round(($completedSize / $totalEstimatedSize) * 100, 1)
+        } else { 0 }
 
-        if (-not (Test-Path $sourcePath)) {
-            continue
-        }
-
-        $destPath = Join-Path $appDataBase $folder
-        Write-Log "Backing up AppData: $folder" -Level INFO
+        Write-Progress -Activity "Backing up user data" -Status "AppData: $($item.Folder) ($percentComplete% complete)" -PercentComplete $percentComplete
+        Write-Log "Backing up AppData: $($item.Folder)" -Level INFO
 
         try {
-            robocopy $sourcePath $destPath /E /R:1 /W:1 /MT:4 /NFL /NDL /NJH /NJS 2>&1 | Out-Null
+            robocopy $item.Path $destPath /E /R:1 /W:1 /MT:4 /NFL /NDL /NJH /NJS 2>&1 | Out-Null
 
             if ($LASTEXITCODE -le 7) {
-                Write-Log "Copied AppData: $folder" -Level SUCCESS
+                Write-Log "Copied AppData: $($item.Folder)" -Level SUCCESS
             }
         }
         catch {
-            Write-Log "Error backing up AppData $folder : $_" -Level WARNING
+            Write-Log "Error backing up AppData $($item.Folder) : $_" -Level WARNING
         }
+
+        # Update completed size for progress
+        $completedSize += $folderSizes["AppData:$($item.Folder)"]
     }
+
+    Write-Progress -Activity "Backing up user data" -Completed
 
     $sizeMB = [math]::Round($totalSize / 1MB, 2)
     Write-Log "User data backup complete: $totalFiles files, $sizeMB MB" -Level SUCCESS
@@ -924,11 +991,51 @@ function Start-InteractiveMode {
 # ENTRY POINT
 # ============================================================================
 
+function Initialize-BackupDrivePrompt {
+    Clear-Host
+    Write-Host ""
+    Write-Host "============================================" -ForegroundColor Cyan
+    Write-Host "  PC MIGRATION TOOLKIT v$($Global:Config.Version)" -ForegroundColor Cyan
+    Write-Host "============================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Where would you like to store backups?" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Examples:" -ForegroundColor Gray
+    Write-Host "  D:\PCMigration" -ForegroundColor Gray
+    Write-Host "  E:\Backup" -ForegroundColor Gray
+    Write-Host "  \\server\share\backup" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "Current default: $($Global:Config.BackupDrive)" -ForegroundColor Yellow
+    Write-Host ""
+
+    $newPath = Read-Host "Enter backup path (or press Enter for default)"
+
+    if (-not [string]::IsNullOrWhiteSpace($newPath)) {
+        $validation = Test-ValidBackupPath -Path $newPath
+        if ($validation.Valid) {
+            $Global:Config.BackupDrive = $newPath
+            Write-Host "Backup path set to: $newPath" -ForegroundColor Green
+        }
+        else {
+            Write-Host "Invalid path: $($validation.Reason)" -ForegroundColor Red
+            Write-Host "Using default: $($Global:Config.BackupDrive)" -ForegroundColor Yellow
+        }
+    }
+    else {
+        Write-Host "Using default: $($Global:Config.BackupDrive)" -ForegroundColor Green
+    }
+
+    Start-Sleep -Seconds 1
+}
+
 # Verify admin
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "This script requires Administrator privileges!" -ForegroundColor Red
     Write-Host "Right-click PowerShell and select 'Run as Administrator'" -ForegroundColor Yellow
     exit 1
 }
+
+# Prompt for backup drive on startup
+Initialize-BackupDrivePrompt
 
 Start-InteractiveMode

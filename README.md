@@ -1,4 +1,4 @@
-# PC Migration Toolkit v3.1
+# PC Migration Toolkit v3.2
 
 ## What This Tool Actually Does
 
@@ -107,3 +107,9 @@ v3.0 does what actually works: reinstall via package managers + backup user data
 - **Sensitive folders** (`.ssh`) require explicit confirmation before backup
 - **Path validation** blocks system directories and relative paths
 - **Inventory warnings** remind you the file contains system info
+
+## UX Improvements (v3.2)
+
+- **Startup prompt** asks for backup location on launch
+- **Progress bar** shows percentage complete during user data backup
+- **Size estimation** calculates total backup size before starting
