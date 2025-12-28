@@ -15,7 +15,7 @@ PC Migration Toolkit v3.2 - A PowerShell script that does PC migration the right
 
 ```powershell
 # Must run as Administrator
-.\Ultimate-PC-Migration-Toolkit-v2.ps1
+.\PC-Migration-Tool.ps1
 ```
 
 Interactive menu with 5 options: Backup, Restore, View Inventory, Configure Path, Exit.

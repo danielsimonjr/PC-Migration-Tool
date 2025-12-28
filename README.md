@@ -23,7 +23,7 @@
 
 ```powershell
 # Run as Administrator
-.\Ultimate-PC-Migration-Toolkit-v2.ps1
+.\PC-Migration-Tool.ps1
 ```
 
 ### On Old PC
