@@ -69,7 +69,16 @@ $Global:Config = @{
         "__pycache__",
         "*.tmp",
         "*.log",
-        "Thumbs.db"
+        "Thumbs.db",
+        # Cloud sync folders (already backed up to servers)
+        "Dropbox",
+        "OneDrive",
+        "OneDrive - *",
+        "Google Drive",
+        "iCloudDrive",
+        "iCloud Drive",
+        "Box",
+        "Box Sync"
     )
 }
 

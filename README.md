@@ -118,6 +118,11 @@ Check `inventory.json` after restore. It lists all apps that were installed. For
 - Verified before restore begins
 - Warns if files are corrupted
 
+### Smart Exclusions
+- **Cloud sync folders** automatically skipped (Dropbox, OneDrive, Google Drive, iCloud, Box)
+- **Dev folders** excluded (node_modules, .git/objects, __pycache__)
+- **Large files** over 1GB skipped
+
 ### Security
 - **Sensitive folders** (`.ssh`) require explicit confirmation before backup
 - **Path validation** blocks system directories
