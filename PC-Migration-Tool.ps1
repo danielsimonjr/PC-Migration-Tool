@@ -1,5 +1,5 @@
 # ============================================================================
-# PC MIGRATION TOOLKIT v3.3
+# PC MIGRATION TOOLKIT v3.6.1
 # Honest PC Migration: Package Managers + User Data
 #
 # Created for: Daniel Simon Jr. - Systems Engineer
@@ -58,7 +58,7 @@ param(
 $Global:Config = @{
     BackupDrive         = "D:\PCMigration"
     LogFile             = "migration.log"
-    Version             = "3.6"
+    Version             = "3.6.1"
 
     # Backup entire user profile (set to $true to scan all folders)
     BackupFullProfile   = $true
@@ -1790,75 +1790,6 @@ function Show-Inventory {
             Sort-Object Name |
             Format-Table Name, Version, Publisher -AutoSize
     }
-}
-
-# ============================================================================
-# MAIN MENU
-# ============================================================================
-
-function Show-MainMenu {
-    Clear-Host
-    Write-Host ""
-    Write-Host "============================================" -ForegroundColor Cyan
-    Write-Host "  PC MIGRATION TOOLKIT" -ForegroundColor Cyan
-    Write-Host "============================================" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "  1. Backup (export packages + user data)" -ForegroundColor Green
-    Write-Host "  2. Restore (install packages + user data)" -ForegroundColor Yellow
-    Write-Host "  3. View Inventory" -ForegroundColor Cyan
-    Write-Host "  4. Configure Backup Path" -ForegroundColor White
-    Write-Host "  5. Exit" -ForegroundColor Red
-    Write-Host ""
-    Write-Host "Current backup path: $($Global:Config.BackupDrive)" -ForegroundColor Gray
-    Write-Host ""
-}
-
-function Start-InteractiveMode {
-    do {
-        Show-MainMenu
-        $choice = Read-Host "Select option (1-5)"
-
-        switch ($choice) {
-            "1" {
-                Start-Backup
-                Read-Host "`nPress Enter to continue"
-            }
-            "2" {
-                $backupPath = Read-Host "Backup path (Enter for default: $($Global:Config.BackupDrive))"
-                if ([string]::IsNullOrWhiteSpace($backupPath)) {
-                    $backupPath = $Global:Config.BackupDrive
-                }
-                Start-Restore -BackupPath $backupPath
-                Read-Host "`nPress Enter to continue"
-            }
-            "3" {
-                Show-Inventory
-                Read-Host "`nPress Enter to continue"
-            }
-            "4" {
-                $newPath = Read-Host "Enter new backup path (absolute path required)"
-                if (-not [string]::IsNullOrWhiteSpace($newPath)) {
-                    $validation = Test-ValidBackupPath -Path $newPath
-                    if ($validation.Valid) {
-                        $Global:Config.BackupDrive = $newPath
-                        Write-Host "Backup path updated to: $newPath" -ForegroundColor Green
-                    }
-                    else {
-                        Write-Host "Invalid path: $($validation.Reason)" -ForegroundColor Red
-                    }
-                }
-                Read-Host "`nPress Enter to continue"
-            }
-            "5" {
-                Write-Host "`nGoodbye!" -ForegroundColor Cyan
-                return
-            }
-            default {
-                Write-Host "Invalid option" -ForegroundColor Red
-                Start-Sleep -Seconds 1
-            }
-        }
-    } while ($true)
 }
 
 # ============================================================================

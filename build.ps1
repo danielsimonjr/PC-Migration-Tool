@@ -16,7 +16,7 @@ $IconFile = Join-Path $ScriptDir "pc-migration.ico"
 $ExeTitle = "PC Migration Tool"
 $ExeDescription = "Migrate apps via package managers + user data"
 $ExeCompany = "Daniel Simon Jr."
-$ExeVersion = "3.2.0.0"
+$ExeVersion = "3.6.1.0"
 
 # Check if input file exists
 if (-not (Test-Path $InputFile)) {
