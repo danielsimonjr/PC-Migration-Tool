@@ -920,18 +920,21 @@ function Backup-SingleUserProfile {
 
     Write-Host "Found $($foldersToBackup.Count) folders and $($filesToBackup.Count) files to backup" -ForegroundColor Gray
 
-    # Build list of AppData folders that exist for this user
+    # Build list of AppData folders that exist for this user (track Roaming vs Local)
     $appDataFoldersToBackup = @()
     $userAppDataRoaming = Join-Path $UserProfilePath "AppData\Roaming"
     $userAppDataLocal = Join-Path $UserProfilePath "AppData\Local"
 
     foreach ($folder in $Global:Config.AppDataFolders) {
-        $sourcePath = Join-Path $userAppDataRoaming $folder
-        if (-not (Test-Path $sourcePath)) {
-            $sourcePath = Join-Path $userAppDataLocal $folder
+        # Check Roaming first
+        $roamingPath = Join-Path $userAppDataRoaming $folder
+        if (Test-Path $roamingPath) {
+            $appDataFoldersToBackup += @{ Folder = $folder; Path = $roamingPath; Location = "Roaming" }
         }
-        if (Test-Path $sourcePath) {
-            $appDataFoldersToBackup += @{ Folder = $folder; Path = $sourcePath }
+        # Check Local
+        $localPath = Join-Path $userAppDataLocal $folder
+        if (Test-Path $localPath) {
+            $appDataFoldersToBackup += @{ Folder = $folder; Path = $localPath; Location = "Local" }
         }
     }
 
@@ -968,11 +971,11 @@ function Backup-SingleUserProfile {
             $size = (Get-ChildItem $item.Path -Recurse -File -ErrorAction SilentlyContinue |
                      Measure-Object -Property Length -Sum).Sum
             if ($null -eq $size) { $size = 0 }
-            $folderSizes["AppData:$($item.Folder)"] = $size
+            $folderSizes["AppData:$($item.Location):$($item.Folder)"] = $size
             $totalEstimatedSize += $size
         }
         catch {
-            $folderSizes["AppData:$($item.Folder)"] = 0
+            $folderSizes["AppData:$($item.Location):$($item.Folder)"] = 0
         }
     }
 
@@ -1067,24 +1070,25 @@ function Backup-SingleUserProfile {
         $completedSize += $folderSizes[$folderName]
     }
 
-    # Backup AppData folders with progress
+    # Backup AppData folders with progress (preserving Roaming/Local structure)
     $appDataBase = Join-Path $usersBackupBase "AppData"
     foreach ($item in $appDataFoldersToBackup) {
-        $destPath = Join-Path $appDataBase $item.Folder
+        # Preserve Roaming/Local structure: AppData/Roaming/folder or AppData/Local/folder
+        $destPath = Join-Path $appDataBase "$($item.Location)\$($item.Folder)"
 
         # Calculate and display progress
         $percentComplete = if ($totalEstimatedSize -gt 0) {
             [math]::Round(($completedSize / $totalEstimatedSize) * 100, 1)
         } else { 0 }
 
-        Write-Progress -Activity "Backing up user data" -Status "AppData: $($item.Folder) ($percentComplete% complete)" -PercentComplete $percentComplete
-        Write-Log "Backing up AppData: $($item.Folder)" -Level INFO
+        Write-Progress -Activity "Backing up user data" -Status "AppData\$($item.Location): $($item.Folder) ($percentComplete% complete)" -PercentComplete $percentComplete
+        Write-Log "Backing up AppData\$($item.Location): $($item.Folder)" -Level INFO
 
         try {
             robocopy $item.Path $destPath /E /R:1 /W:1 /MT:4 /NFL /NDL /NJH /NJS 2>&1 | Out-Null
 
             if ($LASTEXITCODE -le 7) {
-                Write-Log "Copied AppData: $($item.Folder)" -Level SUCCESS
+                Write-Log "Copied AppData\$($item.Location): $($item.Folder)" -Level SUCCESS
             }
         }
         catch {
@@ -1092,7 +1096,7 @@ function Backup-SingleUserProfile {
         }
 
         # Update completed size for progress
-        $completedSize += $folderSizes["AppData:$($item.Folder)"]
+        $completedSize += $folderSizes["AppData:$($item.Location):$($item.Folder)"]
     }
 
     Write-Progress -Activity "Backing up user data" -Completed
@@ -1141,8 +1145,133 @@ function Backup-UserData {
     Write-Log "All users backup complete: $grandTotalFiles files, $grandTotalSizeMB MB" -Level SUCCESS
 }
 
+function Restore-SingleUserProfile {
+    param(
+        [string]$SourceUserPath,
+        [string]$DestUserPath,
+        [string]$Username
+    )
+
+    Write-Host ""
+    Write-Host "[$Username] Restoring to $DestUserPath" -ForegroundColor Cyan
+
+    # Get all items from backup source
+    $allItems = Get-ChildItem $SourceUserPath -Force -ErrorAction SilentlyContinue
+
+    foreach ($item in $allItems) {
+        $itemName = $item.Name
+
+        # Skip AppData - handled separately
+        if ($itemName -eq "AppData") { continue }
+
+        Write-Log "[$Username] Restoring: $itemName" -Level INFO
+
+        if ($item.PSIsContainer) {
+            # Directory
+            $destPath = Join-Path $DestUserPath $itemName
+            try {
+                robocopy $item.FullName $destPath /E /R:1 /W:1 /MT:8 /NFL /NDL /NJH /NJS 2>&1 | Out-Null
+                if ($LASTEXITCODE -le 7) {
+                    Write-Log "[$Username] Restored: $itemName" -Level SUCCESS
+                }
+            }
+            catch {
+                Write-Log "[$Username] Error restoring $itemName : $_" -Level ERROR
+            }
+        }
+        else {
+            # File
+            try {
+                Copy-Item -Path $item.FullName -Destination $DestUserPath -Force
+                Write-Log "[$Username] Restored file: $itemName" -Level SUCCESS
+            }
+            catch {
+                Write-Log "[$Username] Error restoring file $itemName : $_" -Level ERROR
+            }
+        }
+    }
+
+    # Restore AppData - check for Roaming/Local structure first
+    $appDataBackup = Join-Path $SourceUserPath "AppData"
+    if (Test-Path $appDataBackup) {
+        $destAppDataRoaming = Join-Path $DestUserPath "AppData\Roaming"
+        $destAppDataLocal = Join-Path $DestUserPath "AppData\Local"
+
+        # Check for new structure (AppData/Roaming, AppData/Local)
+        $roamingBackup = Join-Path $appDataBackup "Roaming"
+        $localBackup = Join-Path $appDataBackup "Local"
+
+        if ((Test-Path $roamingBackup) -or (Test-Path $localBackup)) {
+            # New structure - restore to correct locations
+            if (Test-Path $roamingBackup) {
+                foreach ($folder in (Get-ChildItem $roamingBackup -Directory -ErrorAction SilentlyContinue)) {
+                    $destPath = Join-Path $destAppDataRoaming $folder.Name
+                    Write-Log "[$Username] Restoring AppData\Roaming\$($folder.Name)" -Level INFO
+                    try {
+                        robocopy $folder.FullName $destPath /E /R:1 /W:1 /MT:4 /NFL /NDL /NJH /NJS 2>&1 | Out-Null
+                        if ($LASTEXITCODE -le 7) {
+                            Write-Log "[$Username] Restored AppData\Roaming\$($folder.Name)" -Level SUCCESS
+                        }
+                    }
+                    catch {
+                        Write-Log "[$Username] Error restoring AppData $($folder.Name): $_" -Level WARNING
+                    }
+                }
+            }
+            if (Test-Path $localBackup) {
+                foreach ($folder in (Get-ChildItem $localBackup -Directory -ErrorAction SilentlyContinue)) {
+                    $destPath = Join-Path $destAppDataLocal $folder.Name
+                    Write-Log "[$Username] Restoring AppData\Local\$($folder.Name)" -Level INFO
+                    try {
+                        robocopy $folder.FullName $destPath /E /R:1 /W:1 /MT:4 /NFL /NDL /NJH /NJS 2>&1 | Out-Null
+                        if ($LASTEXITCODE -le 7) {
+                            Write-Log "[$Username] Restored AppData\Local\$($folder.Name)" -Level SUCCESS
+                        }
+                    }
+                    catch {
+                        Write-Log "[$Username] Error restoring AppData $($folder.Name): $_" -Level WARNING
+                    }
+                }
+            }
+        }
+        else {
+            # Old structure - folders directly in AppData, guess location
+            foreach ($folder in $Global:Config.AppDataFolders) {
+                $sourcePath = Join-Path $appDataBackup $folder
+
+                if (-not (Test-Path $sourcePath)) {
+                    continue
+                }
+
+                # Try Roaming first, then Local
+                $destPath = Join-Path $destAppDataRoaming $folder
+                if (-not (Test-Path (Split-Path $destPath -Parent))) {
+                    $destPath = Join-Path $destAppDataLocal $folder
+                }
+
+                Write-Log "[$Username] Restoring AppData: $folder" -Level INFO
+
+                try {
+                    robocopy $sourcePath $destPath /E /R:1 /W:1 /MT:4 /NFL /NDL /NJH /NJS 2>&1 | Out-Null
+                    if ($LASTEXITCODE -le 7) {
+                        Write-Log "[$Username] Restored AppData: $folder" -Level SUCCESS
+                    }
+                }
+                catch {
+                    Write-Log "[$Username] Error restoring AppData $folder : $_" -Level WARNING
+                }
+            }
+        }
+    }
+
+    Write-Log "[$Username] Profile restore complete" -Level SUCCESS
+}
+
 function Restore-UserData {
-    param([string]$BackupPath)
+    param(
+        [string]$BackupPath,
+        [switch]$SkipConfirm
+    )
 
     $backupBase = Join-Path $BackupPath "UserData"
 
@@ -1153,101 +1282,71 @@ function Restore-UserData {
 
     # Check for new structure (Users\username) or old structure
     $usersFolder = Join-Path $backupBase "Users"
-    $backupUsername = $null
-
-    if (Test-Path $usersFolder) {
-        # New structure - find the backed up username
-        $userFolders = Get-ChildItem $usersFolder -Directory
-        if ($userFolders.Count -gt 0) {
-            $backupUsername = $userFolders[0].Name
-            $sourceBase = Join-Path $usersFolder $backupUsername
-            Write-Host "Found backup for user: $backupUsername" -ForegroundColor Cyan
-        }
-    }
-
-    if (-not $backupUsername) {
-        # Old structure - direct folders
-        $sourceBase = $backupBase
-    }
 
     Write-Log "Restoring user data..." -Level INFO
-    Write-Host ""
-    Write-Host "WARNING: This will copy files to your user profile." -ForegroundColor Yellow
-    Write-Host "Existing files with the same name will be overwritten." -ForegroundColor Yellow
-    $confirm = Read-Host "Continue? (Y/N)"
 
-    if ($confirm -ne 'Y') {
-        Write-Log "User data restore cancelled" -Level INFO
-        return
-    }
+    if (Test-Path $usersFolder) {
+        # New multi-user structure
+        $backupUsers = Get-ChildItem $usersFolder -Directory
 
-    $userProfile = $env:USERPROFILE
+        Write-Host ""
+        Write-Host "Found $($backupUsers.Count) user profile(s) in backup:" -ForegroundColor Cyan
+        foreach ($user in $backupUsers) {
+            $localProfile = "C:\Users\$($user.Name)"
+            $exists = Test-Path $localProfile
+            $status = if ($exists) { "[OK]" } else { "[MISSING]" }
+            $color = if ($exists) { "Green" } else { "Yellow" }
+            Write-Host "  $status $($user.Name)" -ForegroundColor $color
+        }
 
-    # Get all items from backup source
-    $allItems = Get-ChildItem $sourceBase -Force -ErrorAction SilentlyContinue
+        Write-Host ""
+        Write-Host "WARNING: This will copy files to user profiles." -ForegroundColor Yellow
+        Write-Host "Existing files with the same name will be overwritten." -ForegroundColor Yellow
 
-    foreach ($item in $allItems) {
-        $itemName = $item.Name
-
-        # Skip AppData - handled separately
-        if ($itemName -eq "AppData") { continue }
-
-        Write-Log "Restoring: $itemName" -Level INFO
-
-        if ($item.PSIsContainer) {
-            # Directory
-            $destPath = Join-Path $userProfile $itemName
-            try {
-                robocopy $item.FullName $destPath /E /R:1 /W:1 /MT:8 /NFL /NDL /NJH /NJS 2>&1 | Out-Null
-                if ($LASTEXITCODE -le 7) {
-                    Write-Log "Restored: $itemName" -Level SUCCESS
-                }
-            }
-            catch {
-                Write-Log "Error restoring $itemName : $_" -Level ERROR
+        if (-not $SkipConfirm) {
+            $confirm = Read-Host "Continue? (Y/N)"
+            if ($confirm -ne 'Y') {
+                Write-Log "User data restore cancelled" -Level INFO
+                return
             }
         }
-        else {
-            # File
-            try {
-                Copy-Item -Path $item.FullName -Destination $userProfile -Force
-                Write-Log "Restored file: $itemName" -Level SUCCESS
-            }
-            catch {
-                Write-Log "Error restoring file $itemName : $_" -Level ERROR
-            }
-        }
-    }
 
-    # Restore AppData
-    $appDataBackup = Join-Path $sourceBase "AppData"
-    if (Test-Path $appDataBackup) {
-        foreach ($folder in $Global:Config.AppDataFolders) {
-            $sourcePath = Join-Path $appDataBackup $folder
+        # Restore each user
+        foreach ($user in $backupUsers) {
+            $localProfile = "C:\Users\$($user.Name)"
 
-            if (-not (Test-Path $sourcePath)) {
+            if (-not (Test-Path $localProfile)) {
+                Write-Host ""
+                Write-Host "[$($user.Name)] SKIPPED - Profile not found at $localProfile" -ForegroundColor Yellow
+                Write-Host "  Run Setup-Users.ps1 first to create the account," -ForegroundColor Gray
+                Write-Host "  then log in as that user once to create the profile." -ForegroundColor Gray
+                Write-Log "[$($user.Name)] Skipped - profile not found" -Level WARNING
                 continue
             }
 
-            # Try APPDATA first, then LOCALAPPDATA
-            $destPath = Join-Path $env:APPDATA $folder
-            if (-not (Test-Path (Split-Path $destPath -Parent))) {
-                $destPath = Join-Path $env:LOCALAPPDATA $folder
-            }
+            Restore-SingleUserProfile -SourceUserPath $user.FullName -DestUserPath $localProfile -Username $user.Name
+        }
 
-            Write-Log "Restoring AppData: $folder" -Level INFO
+        Write-Host ""
+        Write-Host "========================================" -ForegroundColor Green
+        Write-Host "ALL USERS RESTORE COMPLETE" -ForegroundColor Green
+        Write-Host "========================================" -ForegroundColor Green
+    }
+    else {
+        # Old single-user structure - restore to current user
+        Write-Host ""
+        Write-Host "WARNING: This will copy files to your user profile." -ForegroundColor Yellow
+        Write-Host "Existing files with the same name will be overwritten." -ForegroundColor Yellow
 
-            try {
-                robocopy $sourcePath $destPath /E /R:1 /W:1 /MT:4 /NFL /NDL /NJH /NJS 2>&1 | Out-Null
-
-                if ($LASTEXITCODE -le 7) {
-                    Write-Log "Restored AppData: $folder" -Level SUCCESS
-                }
-            }
-            catch {
-                Write-Log "Error restoring AppData $folder : $_" -Level WARNING
+        if (-not $SkipConfirm) {
+            $confirm = Read-Host "Continue? (Y/N)"
+            if ($confirm -ne 'Y') {
+                Write-Log "User data restore cancelled" -Level INFO
+                return
             }
         }
+
+        Restore-SingleUserProfile -SourceUserPath $backupBase -DestUserPath $env:USERPROFILE -Username $env:USERNAME
     }
 
     Write-Log "User data restore complete" -Level SUCCESS
@@ -1330,6 +1429,9 @@ function Start-Backup {
     param([switch]$Resume)
 
     $backupPath = $Global:Config.BackupDrive
+
+    # Register interrupt handler for graceful cancellation
+    Register-InterruptHandler -BackupPath $backupPath
 
     Write-Host ""
     Write-Host "============================================" -ForegroundColor Cyan
@@ -1535,7 +1637,13 @@ function Start-Backup {
 }
 
 function Start-Restore {
-    param([string]$BackupPath)
+    param(
+        [string]$BackupPath,
+        [switch]$SkipConfirm
+    )
+
+    # Register interrupt handler for graceful cancellation
+    Register-InterruptHandler -BackupPath $BackupPath
 
     Write-Host ""
     Write-Host "============================================" -ForegroundColor Yellow
@@ -1582,32 +1690,42 @@ function Start-Restore {
         Write-Host "  Last save: $($savedProgress.LastUpdate)" -ForegroundColor Gray
         Write-Host "  Completed: $($savedProgress.CompletedSteps.Count) steps" -ForegroundColor Gray
         Write-Host ""
-        Write-Host "  1. Resume where you left off" -ForegroundColor Green
-        Write-Host "  2. Start fresh (redo everything)" -ForegroundColor Yellow
-        Write-Host "  3. Cancel" -ForegroundColor Red
-        Write-Host ""
 
-        $resumeChoice = Read-Host "Select option (1-3)"
+        if ($SkipConfirm) {
+            # CLI mode: auto-resume
+            $Global:Progress.Operation = "restore"
+            $Global:Progress.StartTime = $savedProgress.StartTime
+            $Global:Progress.CompletedSteps = @($savedProgress.CompletedSteps)
+            Write-Host "Auto-resuming restore (CLI mode)..." -ForegroundColor Green
+        }
+        else {
+            Write-Host "  1. Resume where you left off" -ForegroundColor Green
+            Write-Host "  2. Start fresh (redo everything)" -ForegroundColor Yellow
+            Write-Host "  3. Cancel" -ForegroundColor Red
+            Write-Host ""
 
-        switch ($resumeChoice) {
-            "1" {
-                $Global:Progress.Operation = "restore"
-                $Global:Progress.StartTime = $savedProgress.StartTime
-                $Global:Progress.CompletedSteps = @($savedProgress.CompletedSteps)
-                Write-Host ""
-                Write-Host "Resuming restore..." -ForegroundColor Green
-            }
-            "2" {
-                Clear-Progress -BackupPath $BackupPath
-                $Global:Progress.Operation = "restore"
-                $Global:Progress.StartTime = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-                $Global:Progress.CompletedSteps = @()
-                Write-Host ""
-                Write-Host "Starting fresh restore..." -ForegroundColor Green
-            }
-            default {
-                Write-Log "Restore cancelled" -Level INFO
-                return
+            $resumeChoice = Read-Host "Select option (1-3)"
+
+            switch ($resumeChoice) {
+                "1" {
+                    $Global:Progress.Operation = "restore"
+                    $Global:Progress.StartTime = $savedProgress.StartTime
+                    $Global:Progress.CompletedSteps = @($savedProgress.CompletedSteps)
+                    Write-Host ""
+                    Write-Host "Resuming restore..." -ForegroundColor Green
+                }
+                "2" {
+                    Clear-Progress -BackupPath $BackupPath
+                    $Global:Progress.Operation = "restore"
+                    $Global:Progress.StartTime = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+                    $Global:Progress.CompletedSteps = @()
+                    Write-Host ""
+                    Write-Host "Starting fresh restore..." -ForegroundColor Green
+                }
+                default {
+                    Write-Log "Restore cancelled" -Level INFO
+                    return
+                }
             }
         }
     }
@@ -1643,11 +1761,13 @@ function Start-Restore {
             } catch { }
         }
 
-        Write-Host ""
-        $confirm = Read-Host "Start restore? (Y/N)"
-        if ($confirm -ne 'Y') {
-            Write-Log "Restore cancelled" -Level INFO
-            return
+        if (-not $SkipConfirm) {
+            Write-Host ""
+            $confirm = Read-Host "Start restore? (Y/N)"
+            if ($confirm -ne 'Y') {
+                Write-Log "Restore cancelled" -Level INFO
+                return
+            }
         }
 
         # Initialize progress
@@ -1675,10 +1795,15 @@ function Start-Restore {
                 foreach ($err in $integrity.Errors | Select-Object -First 5) {
                     Write-Host "    - $err" -ForegroundColor Yellow
                 }
-                $continueAnyway = Read-Host "Continue anyway? (Y/N)"
-                if ($continueAnyway -ne 'Y') {
-                    Write-Log "Restore cancelled due to verification errors" -Level WARNING
-                    return
+                if (-not $SkipConfirm) {
+                    $continueAnyway = Read-Host "Continue anyway? (Y/N)"
+                    if ($continueAnyway -ne 'Y') {
+                        Write-Log "Restore cancelled due to verification errors" -Level WARNING
+                        return
+                    }
+                }
+                else {
+                    Write-Host "  Continuing despite errors (CLI mode with -y flag)" -ForegroundColor Yellow
                 }
             }
         }
@@ -1737,7 +1862,7 @@ function Start-Restore {
 
     if (-not (Test-StepCompleted -StepName "RestoreUserData")) {
         Set-CurrentStep -StepName "RestoreUserData" -BackupPath $BackupPath
-        Restore-UserData -BackupPath $BackupPath
+        Restore-UserData -BackupPath $BackupPath -SkipConfirm:$SkipConfirm
         Mark-StepComplete -StepName "RestoreUserData" -BackupPath $BackupPath
     } else {
         Write-Host "  [SKIP] UserData - already completed" -ForegroundColor DarkGray
@@ -2200,8 +2325,8 @@ function Start-CLIRestore {
         }
     }
 
-    # Run restore
-    Start-Restore -BackupPath $BackupPath
+    # Run restore (pass through SkipConfirm for fully non-interactive CLI mode)
+    Start-Restore -BackupPath $BackupPath -SkipConfirm:$SkipConfirm
 }
 
 function Start-CLIVerify {
