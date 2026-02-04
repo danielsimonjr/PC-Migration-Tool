@@ -16,12 +16,13 @@ PC Migration Toolkit v3.6 - A PowerShell script for simple PC migration:
 
 | File | Purpose |
 |------|---------|
-| `PC-Migration-Tool.ps1` | Main migration script (~1800 lines) |
+| `PC-Migration-Tool.ps1` | Main migration script (~2000 lines) |
 | `PC-Migration-Tool.exe` | Compiled exe for non-technical users |
 | `Setup-Users.ps1` | Helper to create user accounts on new PC |
 | `build.ps1` | Build script for PS2EXE compilation |
 | `README.md` | User documentation and quick start guide |
 | `CHANGELOG.md` | Version history and release notes |
+| `pc-migration.ico` | Application icon (used by build) |
 
 ## Running the Tool
 
@@ -34,34 +35,28 @@ PC Migration Toolkit v3.6 - A PowerShell script for simple PC migration:
 .\Setup-Users.ps1 -BackupPath D:\Backup
 ```
 
+## CLI Mode
+
+```powershell
+.\PC-Migration-Tool.ps1 backup -Path D:\Backup      # Run backup
+.\PC-Migration-Tool.ps1 backup -Path D:\Backup -y   # Skip confirmation
+.\PC-Migration-Tool.ps1 restore -Path D:\Backup     # Restore from backup
+.\PC-Migration-Tool.ps1 verify -Path D:\Backup      # Verify checksums
+.\PC-Migration-Tool.ps1 inventory -Path D:\Backup   # View app inventory
+.\PC-Migration-Tool.ps1 -Help                       # Show help
+```
+
 ## User Flow
 
-### Main Menu (First Screen)
-```
-1. BACKUP - Save everything from this PC
-2. RESTORE - Put everything on this PC
-3. Exit
-```
+Interactive mode: 3-option menu (Backup/Restore/Exit). Backup prompts for folder selection. Restore auto-detects `backup-manifest.json` in exe folder.
 
-### Backup Flow
-User selects where to save backup:
-```
-1. Use this folder: [exe location]  <- Best for USB workflow
-2. Browse for folder
-3. Enter path manually
-4. Go back
-```
-
-### Restore Flow
-Auto-detects `backup-manifest.json` in exe folder:
-- If found: Shows backup info (PC name, user, date) -> Confirm to restore
-- If not found: Shows error with instructions
+See README.md for detailed user walkthrough.
 
 ## Architecture
 
-Single PowerShell file (~1800 lines) organized into sections:
+Single PowerShell file (~2000 lines) organized into sections. Requires PowerShell 5.1+ and Administrator privileges (`#Requires -RunAsAdministrator`).
 
-### Configuration (Lines 58-128)
+### Configuration ($Global:Config hashtable)
 - `BackupFullProfile` - Set to $true to scan all user folders
 - `SensitiveFolders` - Empty (previously prompted for .ssh)
 - `AppDataFolders` - Specific AppData folders to backup
@@ -73,7 +68,7 @@ Single PowerShell file (~1800 lines) organized into sections:
 - `$Global:Progress` - Tracks operation progress for resume capability
 - `$Global:ShellFolderMap` - Maps logical folder names to Shell API constants
 
-### Folder Path Resolution (Lines 131-172)
+### Folder Path Resolution
 - `Get-ActualFolderPath` - Resolves folder paths via Windows Shell API
 - Handles OneDrive folder redirection automatically
 
@@ -170,6 +165,12 @@ If backup/restore is interrupted:
 - Split `Write-Host` calls with `-NoNewline` to avoid string interpolation issues
 - Global variables set at startup work better than local variables in functions
 
+## Gotchas
+
+- **`$Global:Config.BackupDrive`** - Default `D:\PCMigration` is never used; user always selects location interactively or via `-Path`
+- **Robocopy exit codes** - Exit codes 0-7 are success (files copied), only 8+ indicates error. The script handles this but logs may show non-zero exits.
+- **Version sync** - Keep `$Global:Config.Version` in script and `$ExeVersion` in build.ps1 in sync when releasing
+
 ## Building the EXE
 
 ```powershell
@@ -181,3 +182,14 @@ Or manually:
 Import-Module ps2exe
 Invoke-PS2EXE -inputFile '.\PC-Migration-Tool.ps1' -outputFile '.\PC-Migration-Tool.exe' -requireAdmin
 ```
+
+**Note:** Update `$ExeVersion` in build.ps1 when releasing new versions.
+
+## Testing
+
+No automated test suite. Manual testing workflow:
+1. Run backup on a test machine with multiple user profiles
+2. Verify output structure: `PackageManagers/`, `UserData/Users/`, `backup-manifest.json`
+3. Run `verify` command to check checksums
+4. Test restore on clean Windows install
+5. Verify package manager imports install apps correctly
