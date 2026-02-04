@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-PC Migration Toolkit v3.6 - A PowerShell script for simple PC migration:
+PC Migration Toolkit v3.6.1 - A PowerShell script for simple PC migration:
 - Exports Winget/Chocolatey/Scoop package lists for proper reinstallation
 - Backs up ALL user profiles with full folder structure (`Users\username\...`)
 - Creates an inventory of installed apps (reference only)
@@ -91,6 +91,7 @@ Single PowerShell file (~2000 lines) organized into sections. Requires PowerShel
 ### User Data Functions
 - `Backup-SingleUserProfile` - Backs up one user profile
 - `Backup-UserData` - Iterates all user profiles on PC
+- `Restore-SingleUserProfile` - Restores one user profile to matching local path
 - `Restore-UserData` - Restores all users from backup
 - Uses robocopy with multithreading
 
@@ -114,6 +115,8 @@ BackupLocation/
 │       │   ├── Downloads/
 │       │   ├── .gitconfig
 │       │   └── AppData/
+│       │       ├── Roaming/
+│       │       └── Local/
 │       └── danie/
 │           ├── .vscode/
 │           ├── .gitconfig
@@ -170,6 +173,9 @@ If backup/restore is interrupted:
 - **`$Global:Config.BackupDrive`** - Default `D:\PCMigration` is never used; user always selects location interactively or via `-Path`
 - **Robocopy exit codes** - Exit codes 0-7 are success (files copied), only 8+ indicates error. The script handles this but logs may show non-zero exits.
 - **Version sync** - Keep `$Global:Config.Version` in script and `$ExeVersion` in build.ps1 in sync when releasing
+- **Multi-user restore requires matching profiles** - Users must exist locally (`C:\Users\username`) before restore; run `Setup-Users.ps1` first
+- **AppData structure** - Backup preserves `AppData/Roaming/` vs `AppData/Local/`; restore auto-detects and handles old flat structure
+- **CLI `-y` flag** - Must flow through entire call chain (`Start-CLIRestore` → `Start-Restore` → `Restore-UserData`) via `SkipConfirm` parameter
 
 ## Building the EXE
 
